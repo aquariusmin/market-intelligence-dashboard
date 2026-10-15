@@ -1,8 +1,55 @@
-# Market Intelligence Dashboard v0.2
+# Market Intelligence Dashboard v0.3
 
 기존 HTML/CSS/Vanilla JavaScript UI를 유지한 로컬 일별 시장 데이터 대시보드입니다.
 
 공개 저장소에는 코드와 실행 문서만 포함합니다. 실제 시세 `data/markets.json`과 제공받은 KRX 명세서(`Spec.docx`, `Spec-2.docx`)는 저작권·재배포 조건 때문에 제외했습니다. 최초 실행 시 아래 수집 명령으로 로컬 데이터를 생성하세요. 데이터가 없을 때도 DEMO 모드를 사용할 수 있습니다. 설치·빌드·DB·백엔드 앱이 필요하지 않습니다. Python 3.9 이상과 시스템 `curl`을 사용합니다(macOS 기본 제공). HTTPS 인증서 검증을 유지합니다.
+
+## v0.3 시장 분석 확장
+
+- 기존 지수 수집·DEMO 모드 유지. 5/20/60관측일 수익률, 20/60관측일 연율 변동성, 52주 종가 고점 대비 하락률, SMA 대비 거리와 규칙 기반 국면을 표시합니다.
+- 차트는 1M/3M/6M/1Y 달력 기간을 마지막 관측일 기준으로 선택합니다. SMA 20/50/200을 개별 표시하며 선택 구간 전의 이력도 계산에 사용합니다. 툴팁은 실제 관측일의 종가·각 SMA를 보여줍니다.
+- 52주 고점은 마지막 관측일부터 364일 안의 **종가** 고점입니다. 해당 기간을 포괄하는 이력이 없으면 계산하지 않습니다. 장중 고점과 다릅니다.
+- 국면: 종가 ≥ SMA20 ≥ SMA50 ≥ SMA200, 20일 수익률 양수면 상승. 모두 반대이고 수익률 음수면 하락. 나머지는 혼조입니다. 연율 변동성 <20% 낮음, 20–25% 보통, ≥25% 높음. 이 임계값은 검증된 예측 모델이 아닌 설명 가능한 고정 규칙입니다.
+
+기존 데이터만으로 새 기술 분석을 적용하려면:
+
+```sh
+python3 scripts/collect_data.py --recalculate
+```
+
+원본 관측일·정상 수집 시각은 유지하고 분석 계산 시각만 별도로 기록합니다.
+
+거시 데이터 수집은 별도 명령입니다:
+
+```sh
+python3 scripts/collect_macro.py
+```
+
+완료 후 **JSON 다시 읽기**를 누르세요. 일부 이용 불가 지표가 있으면 종료 코드 1이지만 성공한 지표는 저장됩니다. 지수 수집 명령과 독립적으로 실행할 수 있습니다.
+
+| 지표 | 원본 시리즈 / 출처 | 제공 방식 |
+| --- | --- | --- |
+| VIX | VIXCLS / Cboe via FRED | 일별 종가, pt |
+| 미국 2Y / 10Y | DGS2 / DGS10, Federal Reserve Board via FRED | 일별, % |
+| 10Y−2Y | T10Y2Y, St. Louis Fed via FRED | 일별, %p. 서로 다른 날짜의 최신 2Y·10Y를 빼지 않음 |
+| HY Credit Spread | BAMLH0A0HYM2, ICE via FRED | 일별 Option-Adjusted Spread, %p |
+| ICE Dollar Index / DXY | 무료 수집원·권한 미확보 | 이용 불가 |
+| 광의 달러 지수 | DTWEXBGS, Federal Reserve Board via FRED | 별도 추가 지표, 2006=100. DXY 대체값 아님 |
+| USD/KRW | DEXKOUS, Federal Reserve Board via FRED | 뉴욕 정오 기준 원/달러. 한국 시장 종가와 다름 |
+| 한국은행 기준금리 | ECOS 722Y001 / 0101000 / D | ECOS_API_KEY 필요 |
+| 한국 국고채 3년 | ECOS 817Y002 / 010200000 / D | ECOS_API_KEY 필요 |
+
+한국은행의 [ECOS Open API](https://ecos.bok.or.kr/api/)에서 무료 키를 발급받아 같은 터미널의 `ECOS_API_KEY` 환경변수에 설정합니다. KRX 키와 별개입니다. ECOS 두 항목은 키가 없는 환경에서는 이용 불가로 표시되며 실제 호출은 미검증입니다. 코드의 응답 파싱은 오프라인 테스트로 확인합니다.
+
+거시 파일은 `data/reference_only/macro.json`이며 공개 Git 대상에서 제외됩니다. 지표별 `value`, `observation_date`, `updated_at`(로컬 정상 수집 시각), `source`, `status`, `last_attempt_at`, `history`, `change`를 기록합니다. 금리 수준은 %, 전 관측 대비 차이는 %p입니다. 관측일과 실제 공개일을 구분하며, CSV/ECOS 응답에 없는 `publication_date`, `source_updated_at`은 **null**로 유지합니다. 수집 시각을 최초 공개 시각으로 사용하지 않습니다. 휴장·결측값을 채우지 않으며 지표별 관측일이 서로 다를 수 있습니다. 과거 수정치가 포함될 수 있어 이 파일은 point-in-time 백테스트 자료가 아닙니다.
+
+거시 수집 실패는 해당 지표의 이전 값·이력·관측일·정상 수집 시각을 보존하고 stale 상태를 기록합니다. 중복/역행/미래일·NaN·범위 초과·이력 급감·14일 초과 지연 신규 응답은 거부합니다. JSON 로딩 실패 시 화면도 마지막 정상 데이터를 유지합니다.
+
+### 거시 데이터 이용 조건
+
+[FRED 이용 조건](https://fred.stlouisfed.org/legal/)과 각 시리즈의 원 저작권·재배포 제한을 따릅니다. Cboe VIX와 ICE OAS도 원 제공자 권리가 적용됩니다. 모든 FRED 데이터는 모델 개발·학습용으로 재사용하지 않습니다. 거시 파일과 지수별 `usage`에 `ml_training_allowed: false`를 기록하며 학습 데이터 경로와 분리했습니다.
+
+[한국은행 ECOS 이용지침](https://ecos.bok.or.kr/)은 한국은행 작성 통계의 출처 표기를 전제로 무료 이용을 안내하지만, 타 기관 작성 자료에는 해당 기관의 조건이 적용됩니다. ECOS 항목도 권리 검토 전까지 학습 허용으로 표시하지 않습니다. 이번 단계는 로컬 참고용이며 외부 배포·모델 학습을 하지 않습니다.
 
 ## 실행 / 수동 갱신
 
@@ -76,6 +123,7 @@ KRX는 [공식 이용 절차](https://openapi.krx.co.kr/contents/OPP/INFO/OPPINF
 
 ```sh
 python3 scripts/test_data.py
+node scripts/test_ui.js      # 의존성 없는 UI 회귀 검사 (Node 설치 시)
 node --check real-data.js  # Node가 설치되어 있다면 선택적으로 문법 검사
 ```
 

@@ -59,9 +59,10 @@ def _request_text_once(url, headers=None, json_body=None):
     if json_body is not None:
         args += ['--request', 'POST', '--header', 'Content-Type: application/json',
                  '--header', 'Accept: application/json', '--data-binary', json.dumps(json_body)]
+    config += 'url = ' + json.dumps(url) + '\n'
     marker = '\n__MARKET_HTTP_STATUS__:'
     try:
-        result = subprocess.run(args + ['--config', '-', '--write-out', marker + '%{http_code}', url],
+        result = subprocess.run(args + ['--config', '-', '--write-out', marker + '%{http_code}'],
                                 input=config, text=True, capture_output=True, timeout=35)
     except subprocess.TimeoutExpired:
         raise RequestError('데이터 요청 시간 초과 · DNS/방화벽/서버 연결 확인', retryable=True) from None

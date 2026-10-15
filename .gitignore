@@ -12,3 +12,6 @@ __pycache__/
 data/markets.json
 Spec.docx
 Spec-2.docx
+
+# Display-only macro data: never commit or use as ML training input
+data/reference_only/
