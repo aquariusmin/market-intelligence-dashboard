@@ -7,9 +7,9 @@ MI="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${MI_ENV_FILE:-$HOME/.config/mi/env}"   # e.g. a line: export KRX_API_KEY=...
 umask 077   # logs, lock and SQLite files readable by the owner only
 if [ -r "$ENV_FILE" ]; then
-  # the file is sourced as shell code: refuse it unless it is ours and nobody else can write it
+  # the file is sourced as shell code and holds keys: refuse it unless it is ours and private (mode 600)
   if [ "$(stat -c %u "$ENV_FILE")" != "$(id -u)" ]; then echo "refusing $ENV_FILE: not owned by $(id -un)" >&2; exit 1; fi
-  case "$(stat -c %a "$ENV_FILE")" in *[2367][0-7]|*[2367]) echo "refusing $ENV_FILE: group/other writable (chmod 600)" >&2; exit 1;; esac
+  case "$(stat -c %a "$ENV_FILE")" in *00) ;; *) echo "refusing $ENV_FILE: group/other access (chmod 600)" >&2; exit 1;; esac
   . "$ENV_FILE"
 fi
 mkdir -p "$MI/data"

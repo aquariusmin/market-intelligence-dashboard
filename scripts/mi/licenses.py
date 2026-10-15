@@ -25,12 +25,15 @@ SOURCES = {
                            redistribution='not_allowed', notes='FRED 약관 + "Copyrighted: Pre-Approval Required".'),
     'krx_openapi': dict(provider='Korea Exchange (KRX OPEN API)', dataset='KOSPI / KOSDAQ 일별 지수',
                         terms_url='https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO002.jsp',
-                        collection='allowed', local_storage='conditional', ml_training='unclear',
+                        collection='allowed', local_storage='conditional', ml_training='allowed',
                         redistribution='not_allowed',
                         conditions=['비상업적 개인 이용 (로컬 대시보드)', '제3자 제공·재배포 없음 (data/ gitignore)',
-                                    '계약 종료 시 이용 중단 (사용자 책임)'],
-                        notes='비상업적 이용만 허용(제6조②), 제3자 제공 금지(제11조②), 계약 종료 후 이용 불가(제11조③). '
-                              'ML 사용 명시 없음 → 학습 불허로 취급.'),
+                                    '계약 종료 시 이용 중단 (사용자 책임)',
+                                    '이용 신청 목적에 연구·머신러닝 기재 (사용자 확인 2026-10-15)'],
+                        ml_basis='약관에 ML 조항 없음. 사용자가 API 이용 신청 시 목적을 연구·머신러닝으로 기재해 승인받음 '
+                                 '(사용자 진술, 2026-10-15). 학습 결과·모델도 제3자에게 제공하지 않음.',
+                        notes='비상업적 이용만 허용(제6조②), 제3자 제공 금지(제11조②), 계약 종료 후 이용 불가(제11조③), '
+                              '키당 1일 10,000회(제8조④). ML: 신청 목적 기반 허용 (ml_basis).'),
     'fed_h15': dict(provider='Federal Reserve Board (DDP)', dataset='H.15 Treasury constant maturity yields',
                     terms_url='https://www.federalreserve.gov/disclaimer.htm', collection='allowed',
                     local_storage='allowed', ml_training='allowed', redistribution='allowed',

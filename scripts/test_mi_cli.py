@@ -134,6 +134,53 @@ class CliTest(unittest.TestCase):
         for bad in ('evil.example:3000', 'localhost.evil.example', '', None, '[::1]:3000'):
             self.assertFalse(serve.allowed_host(bad), bad)
 
+    def test_env_file_loads_only_known_keys_and_requires_owner_only_mode(self):
+        env = Path(self.tmp.name) / 'env'
+        env.write_text('export KRX_API_KEY="k-123"\nANTHROPIC_API_KEY=a-456\nPATH=/evil\n$(touch pwned)\n')
+        with patch.dict('os.environ', {'PATH': '/usr/bin'}, clear=True):
+            env.chmod(0o644)
+            self.assertEqual(mi_cli.load_env_file(env), [])          # readable by others: refused
+            self.assertIn('chmod 600', self.err.getvalue())
+            env.chmod(0o600)
+            self.assertEqual(mi_cli.load_env_file(env), ['KRX_API_KEY', 'ANTHROPIC_API_KEY'])
+            import os
+            self.assertEqual(os.environ['KRX_API_KEY'], 'k-123')
+            self.assertEqual(os.environ['PATH'], '/usr/bin')          # only the two secret names are loaded
+            self.assertFalse((Path(self.tmp.name) / 'pwned').exists())
+            os.environ['KRX_API_KEY'] = 'exported'
+            mi_cli.load_env_file(env)
+            self.assertEqual(os.environ['KRX_API_KEY'], 'exported')   # an exported value wins
+        self.assertNotIn('k-123', self.err.getvalue())
+
+    def test_regime_adds_daily_blocks_and_licence_aware_snapshots(self):
+        import numpy as np
+        import pandas as pd
+        from mi import store
+        days = pd.bdate_range('2025-06-02', periods=320)
+
+        def series(conn, m, snap):
+            close = 100 * np.exp(np.cumsum(np.random.default_rng(len(m) + ord(m[0])).normal(0, .01, 320)))
+            return {'rows': [{'date': d.date().isoformat(), 'close': float(c)} for d, c in zip(days, close)],
+                    'source_id': 'fred_sp500' if m in ('sp', 'nq') else 'krx_openapi', 'status': 'ok'}
+        with patch('mi.prices.read_snapshot', return_value={'markets': {}}), patch('mi.prices.series', side_effect=series):
+            mi_cli.cmd_regime(self.args())
+            mi_cli.cmd_regime(self.args())                         # same data again: nothing new is stored
+        out = json.loads((paths.DASHBOARD / 'regime.json').read_text())
+        self.assertEqual(out['daily']['method'], 'daily-v1')
+        self.assertIn('previous_as_of', out['markets']['ks']['daily'])
+        with store.connect() as conn:
+            rows = {r['market']: r for r in conn.execute('SELECT * FROM daily_snapshots')}
+        self.assertEqual(sorted(rows), ['kq', 'ks', 'nq', 'sp'])   # one row each despite two runs
+        self.assertEqual(rows['sp']['restricted'], 1)
+        self.assertNotIn('risk_score', json.loads(rows['sp']['payload']))
+        self.assertIn('risk_score', json.loads(rows['ks']['payload']))
+        mi_cli.cmd_backup(self.args())
+        self.assertEqual(len(list((paths.DATA / 'backups').glob('mi-*.sqlite'))), 1)
+        mi_cli.cmd_status(self.args())
+        status = json.loads((paths.DASHBOARD / 'status.json').read_text())
+        self.assertEqual(status['storage']['integrity'], 'ok')
+        self.assertEqual(status['storage']['rows']['daily_snapshots'], 4)
+
     def test_write_message(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

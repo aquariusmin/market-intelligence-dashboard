@@ -10,7 +10,8 @@
 - `scripts/mi/` — v1.0 엔진(`.venv` 필요)
   - `timing.py`: available_at / decision_time, as-of 조인
   - `indicators.py`: 인과적 지표, v0.2와 같은 공식
-  - `regime.py`: 규칙 기반 국면·위험
+  - `regime.py`: 규칙 기반 국면·위험 (전일 상태 `previous` 포함)
+  - `daily.py`: v0.4 전일 대비 변화(사전 고정 기준값)·국면 해설·일별 스냅샷
   - `macro.py`: Fed H.15/H.10
   - `licenses.py`: 권한 레지스트리 + ML 게이트
   - `dataset.py`: 피처·라벨
@@ -51,8 +52,9 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # v0.2 수집기 (12)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (65)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (78)
 node --check real-data.js && node --check intel.js
+node --test scripts/test_intel.mjs                                                # intel.js 단위 테스트 (6, vm으로 실제 파일 로드)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \
   .venv/bin/python scripts/ui_smoke.py [--root <fixture>] [--shots <dir>] [--expect "Tab=text"]
 .venv/bin/python .claude/skills/financial-data-audit/scripts/audit_data.py        # 읽기 전용 데이터 감사

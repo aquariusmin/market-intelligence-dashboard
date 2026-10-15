@@ -116,11 +116,12 @@ function regimeCard() {
   if (!intel.regime) return unavailable('Market Regime', missing('regime', '국면 분석'));
   if (!r || r.status !== 'ok') return unavailable('Market Regime', `${esc(markets[state.market].name)}: ${esc(r?.reason || r?.data_error || '분석 불가')}`);
   const g = r.risk;
-  return `<div class="card"><div class="row sectionhead"><h2>Market Regime &amp; Risk</h2>${withFlags('regime', pill('RULE-BASED', ''))}</div><div class="regime ${regTone(r.regime)}">${esc(REG_KO[r.regime] || r.regime)}</div><div class="sub">${esc(r.regime)} · ${esc(r.regime_since)}부터 ${r.regime_days}거래일 · 추세 점수 ${sgn(r.trend_score, 0)}/5${r.raw_regime !== r.regime ? `<br><span class="neutral">당일 원시 신호: ${esc(REG_KO[r.raw_regime] || r.raw_regime)} (${r.confirm_days}일 연속 시 전환)</span>` : ''}</div>
+  return `<div class="card"><div class="row sectionhead"><h2>Market Regime &amp; Risk</h2>${withFlags('regime', pill('RULE-BASED', ''))}</div><div class="regime ${regTone(r.regime)}">${esc(REG_KO[r.regime] || r.regime)}</div><div class="sub">${esc(r.regime)} · ${esc(r.regime_since)}부터 ${r.regime_days}거래일 · 추세 점수 ${sgn(r.trend_score, 0)}/5${r.raw_regime !== r.regime ? `<br><span class="neutral">당일 원시 신호: ${esc(REG_KO[r.raw_regime] || r.raw_regime)} (전환 대기 ${Number.isFinite(r.pending_days) ? r.pending_days : '—'}/${esc(r.confirm_days)}일)</span>` : ''}</div>
   ${[['단기 추세 (20일선·5일)', r.short_term], ['중기 추세 (50/200일선·60일)', r.medium_term]].map(([a, b]) => `<div class="row riskrow"><span class="sub">${a}</span><span class="badge ${b === '상승' ? '' : b === '하락' ? 'negative' : 'neutral'}">${esc(b)}</span></div>`).join('')}
   <div class="row riskrow"><span class="sub">위험 수준</span><strong class="${g.score >= 50 ? 'negative' : g.score >= 25 ? 'neutral' : 'positive'}">${esc(g.level_ko)} · ${num(g.score, 1)}/100</strong></div>${g.components_available ? `<div class="tiny muted">구성요소 ${esc(g.components_available)}${Array.isArray(g.components_missing) && g.components_missing.length ? ` · 미수집 ${g.components_missing.map(c => esc(RISK_KO[c] || c)).join(', ')}` : ''}</div>` : ''}<div class="gauge" aria-hidden="true"><b style="left:calc(${Math.min(100, g.score || 0)}% - 1px)"></b></div>
   <div class="tiny muted">${Object.entries(g.components || {}).map(([k, v]) => `${esc(RISK_KO[k] || k)} ${v === null ? '미수집' : Math.round(v * 100)}`).join(' · ')}</div>
-  <div class="note">출처 ${esc(r.source_id || '—')} · 기준 거래일 ${esc(r.as_of || '—')}<br>${(r.trend_rules || []).map(t => `${t.pass ? '✓' : '✕'} ${esc(t.label)}`).join(' &nbsp; ')}<br>국면은 현재 상태의 규칙 기반 서술이며 미래 수익률 예측이 아닙니다. ${genStamp(intel.regime)}</div></div>`;
+  ${dailyChanges(r)}
+  <div class="note">출처 ${esc(r.source_id || '—')} · 기준 거래일 ${esc(r.as_of || '—')}<br>${(r.trend_rules || []).map(t => `${t.pass ? '✓' : '✕'} ${esc(t.label)}${Number.isFinite(t.value) ? ' ' + sgn(t.value, 2, '%') : ''}`).join(' &nbsp; ')}<br>국면은 현재 상태의 규칙 기반 서술이며 미래 수익률 예측이 아닙니다. ${genStamp(intel.regime)}</div></div>`;
 }
 function factorCards() {
   const r = reg();
@@ -177,12 +178,20 @@ function featurePanel() {
   return `<div class="card"><div class="row sectionhead"><h2>Forecast Drivers</h2><span class="label">${horizon()}D</span></div><div class="sub">LightGBM 정보이득 비중 (개발 구간 적합 · 설명용) 및 현재 입력값</div>${imp.slice(0, 8).map(r => `<div class="row riskrow"><span class="sub">${esc(r.feature)}</span><span><span class="tiny muted">현재 ${num(f.features?.[r.feature])}</span> &nbsp;<strong>${pct(r.gain_share)}</strong></span></div>`).join('') || '<div class="sub">중요도 정보 없음</div>'}<div class="note">변수 중요도는 인과 관계나 방향을 의미하지 않습니다. 제외된 입력: ${(p.dropped_features || []).map(d => esc(d.feature)).join(', ') || '없음'}</div></div>`;
 }
 
+// v0.4 day-over-day block (regime.json markets[k].daily); absent in older files -> nothing shown
+function dailyChanges(r) {
+  const d = r.daily;
+  if (!isObj(d)) return '';
+  const changes = Array.isArray(d.changes) ? d.changes : [], expl = Array.isArray(d.explanation) ? d.explanation : [];
+  return `<div class="riskrow" style="display:block"><span class="sub">전일(${esc(d.previous_as_of || '—')}) 대비</span><ul class="brieflist" style="margin:6px 0 0">${changes.length ? changes.map(c => `<li>${esc(c?.text)}</li>`).join('') : '<li class="muted">기준 이상 변화 없음</li>'}</ul></div>${expl.length ? `<details class="tiny muted" style="margin-top:6px"><summary>국면 판정 근거</summary>${expl.map(x => `<div>${esc(x)}</div>`).join('')}</details>` : ''}`;
+}
+
 /* ---------- briefing ---------- */
 function briefingCard(full) {
   const b = intel.briefing;
   if (!b) return `<div class="card brief">${missing('briefing', '브리핑')}</div>`;
   const s = b.sections, li = a => `<ul class="brieflist">${(Array.isArray(a) ? a : []).map(x => `<li>${esc(x)}</li>`).join('')}</ul>`;
-  const parts = [['1 · Executive Summary', `<p>${esc(s.executive_summary)}</p>`], ['2 · US Market Overview', li(s.us_overview)], ['3 · Korea Market Overview', li(s.korea_overview)],
+  const parts = [...(Array.isArray(s.daily_summary) && s.daily_summary.length ? [['0 · Daily Summary', li(s.daily_summary)]] : []), ['1 · Executive Summary', `<p>${esc(s.executive_summary)}</p>`], ['2 · US Market Overview', li(s.us_overview)], ['3 · Korea Market Overview', li(s.korea_overview)],
     ['4 · Bullish Factors', li(s.bullish_factors)], ['5 · Bearish Factors', li(s.bearish_factors)], ['6 · Market Forecast (정량 모델)', li(s.market_forecast)],
     ['7 · Outlook Changes', li(s.outlook_changes)],
     ['8 · Events to Watch', s.events_to_watch?.length ? `<ul class="brieflist">${s.events_to_watch.map(e => `<li>${esc(e.date)} · ${e.url ? link(e.url, e.title) : esc(e.title)} <span class="tiny muted">(${esc(e.source)})</span></li>`).join('')}</ul>` : `<p class="sub">향후 45일 내 확인된 일정 없음${b.events_status?.fomc === 'failed' ? ' · FOMC 일정 조회 실패' : ''}</p>`]];

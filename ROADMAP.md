@@ -15,7 +15,7 @@
 
 | 이 로드맵 | 목표 | 이미 구현됨 (코드) | 실제로 남은 일 |
 |---|---|---|---|
-| **v0.3.x 안정화** | 리뷰 반영 | `CODE_REVIEW.md`의 수정 사항, 보안 강화, D1–D3 결정 적용 (2026-10-15 완료) | KRX 서면 문의(D4, 사용자가 발송) |
+| **v0.3.x 안정화** | 리뷰 반영 | `CODE_REVIEW.md`의 수정 사항, 보안 강화, D1–D3 결정 적용 (2026-10-15 완료) | 없음 (KRX ML: 이용 신청 목적 확인으로 해소, 사용자가 발송) |
 | **v0.4 Daily Market Intelligence** | 일별 분석 축적과 변화 해설 | 국면·위험·요인(`regime.py`), 전일 대비 국면·위험 변화(`briefing.outlook_changes`), 규칙 기반 브리핑, SQLite | 일별 스냅샷 저장, 구성요소 단위 변화, 국면 상세 해설, Daily Summary 섹션, 저장소 운영 기능 |
 | **v0.5 Market Forecasting** | 실제 데이터 예측 | 데이터셋·라벨, LR·LightGBM, purged walk-forward, 보정 4종, 검증 기준, 예측 저장·판정, 성능 패널 | **학습 가능한 데이터 소스 확보**, 장기 백필, 한국 휴장일, 실제 학습·판정, 결과 보고 |
 | **v0.6 AI News Intelligence** | 실데이터 기반 AI 해설 | Fed·SEC·GDELT 수집, 중복 제거, 9개 분류, 영문 감성, FOMC 일정, LLM 요약(옵트인·수치 검증) | 한국 소스, 분류·감성 정확도 평가, 전망 변화 설명, LLM 실제 운용(승인 후) |
@@ -30,7 +30,7 @@
 |---|---|
 | 작업 | ① 로컬 커밋(push 없음) ✓ ② D1 유지·문서화 ✓, D2 보관용·LLM용 사본 ✓ ③ D3 `lexicon-en-v2` ✓ ④ README H절 버전 매핑 ✓ ⑤ 보안 강화 S3–S7·S11 ✓ |
 | 파일 | `README.md`, `scripts/mi/briefing.py`, `mi_cli.py`, `sentiment.py`, `providers.py`, `store.py`, `cron_run.sh`, 새 `scripts/serve.py` |
-| 완료 기준 | 테스트 77개 통과(12 + 65), UI 스모크 24뷰, `CODE_REVIEW.md` §4의 결정 기록 ✓. 남은 일: KRX 서면 문의(사용자) |
+| 완료 기준 | 테스트 77개 통과(12 + 65), UI 스모크 24뷰, `CODE_REVIEW.md` §4의 결정 기록 ✓. KRX ML 근거 기록 ✓ |
 
 ---
 
@@ -138,12 +138,16 @@
 - **JS 단위 테스트:** `node --test scripts/test_intel.mjs`
 
 ### 완료 판정 기준
-- [ ] 실데이터로 연속 2일 이상 실행했을 때 `daily_snapshots`에 날짜별 행이 쌓이고, Regime 카드와 Briefing에 전일 대비 변화가 표시됨
-- [ ] FRED 시장 행에 수치 값이 0개 (테스트로 증명)
-- [ ] Python 전체 테스트 통과. `daily.py` 커버리지 ≥ 90%, `mi_cli.py` ≥ 70%
-- [ ] JS 단위 테스트가 생기고 통과함
-- [ ] 브라우저 스모크 24뷰 통과(데스크톱·390px)
-- [ ] README에 변화 기준값과 근거를 기록함
+- [ ] 실데이터로 연속 2일 이상 실행했을 때 `daily_snapshots`에 날짜별 행이 쌓임 — **운영 확인 대기.** 실데이터 사본으로 1회 실행해 확인했고(sp·nq 각 1행), Regime 카드·Briefing의 전일 대비 표시는 브라우저 스크린샷으로 확인함
+- [x] FRED 시장 행에 수치 값이 0개 (`test_regime_adds_daily_blocks_and_licence_aware_snapshots`, `test_snapshot_…restricted_payload`)
+- [x] Python 전체 테스트 통과. `daily.py` 98%, `mi_cli.py` 81% (2026-10-15 측정)
+- [x] JS 단위 테스트 6개 (`node --test scripts/test_intel.mjs`)
+- [x] 브라우저 스모크 24뷰 통과, `--expect "Overview=전일(…) 대비"`·`"Overview=0 · Daily Summary"` 포함
+- [x] README C절에 변화 기준값과 근거를 기록함
+
+**구현 상태 (2026-10-15):** 0.4-A~E 구현 완료. 계획과 다른 점은 아래와 같습니다.
+- 스냅샷 키는 `session` 대신 `payload_hash`를 씁니다. 같은 날 morning·evening에 같은 결과가 나오면 한 행만 남고, 데이터 수정으로 결과가 달라질 때만 행이 추가됩니다.
+- 마이그레이션 전 자동 백업은 버전 번호가 아니라 "데이터가 있는 DB인지"로 판단합니다. 원래 코드로 만든 실데이터 DB가 user_version 0이기 때문입니다.
 
 ---
 
@@ -156,7 +160,7 @@
 ### 0.5-A 학습 가능한 데이터 소스 선정 (코드 작업 전에 결정)
 | 후보 | 대상 시장 | 비용 | 확인할 것 | 권고 순서 |
 |---|---|---|---|---|
-| KRX OPEN API (이미 연동됨) | ks·kq | 무료 | **KRX에 ML 이용 가능 여부 서면 문의**(약관에 명시 조항 없음) | 1순위 |
+| KRX OPEN API (이미 연동됨) | ks·kq | 무료 | ✓ 해소: 이용 신청 목적이 연구·머신러닝(사용자 확인 2026-10-15) → `ml_training='allowed'`, 근거 `ml_basis` | **확정** |
 | 라이선스 지수 데이터 (사용자 계약) | sp·nq (+ks·kq) | 유료 가능성 | 계약서에 ML·로컬 저장 권한, 게시 지연 명시 → `data/licensed/manifest.json` | 2순위 (**유료 → 승인 필요**) |
 | 한국은행 ECOS | 한국 거시 피처(기준금리·환율·CPI) | 무료 | 약관 확인(공공누리 유형), 키를 URL에 넣는 방식의 보안(`CODE_REVIEW.md` §3.5) | 피처 보강용 |
 | Fed H.15/H.10 (이미 연동됨) | 거시 피처 | 무료 | 이미 허용 | — |

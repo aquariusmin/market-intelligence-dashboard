@@ -19,7 +19,7 @@
 # 1) 설치 (.venv + numpy/pandas/scikit-learn/lightgbm/scipy)
 make setup                      # = uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 
-# 2) 데이터 수집: v0.2 가격 수집기 + Fed 거시지표 (KRX는 같은 터미널에서 export KRX_API_KEY=... 후 실행)
+# 2) 데이터 수집: v0.2 가격 수집기 + Fed 거시지표 (KRX 키 설정은 아래 "KRX API 키" 참고)
 make ingest                     # = .venv/bin/python scripts/mi_cli.py ingest
 
 # 3) 분석·학습·예측·뉴스·브리핑 (전체: make all)
@@ -28,7 +28,8 @@ make train                      # 라이선스 게이트 + walk-forward 검증 �
 make forecast                   # 미판정 예측 결과 판정 + 실시간 예측 추가 → forecast.json
 make news                       # Fed/SEC RSS + GDELT 메타데이터 → news.json
 make briefing                   # 규칙 기반 한국어 브리핑 → briefing.json
-make status                     # 시스템 상태 → status.json
+make status                     # 시스템 상태(+ SQLite 무결성·행 수·백업 수) → status.json
+.venv/bin/python scripts/mi_cli.py backup   # data/mi.sqlite 온라인 백업 → data/backups/ (자동 삭제 없음)
 
 # 4) 대시보드
 make dev                        # = python3 scripts/serve.py --port 3000 (127.0.0.1 전용 · 허용 파일만 · Host 검사 · CSP)
@@ -44,6 +45,22 @@ make dev                        # = python3 scripts/serve.py --port 3000 (127.0.
 - `MI_FINBERT=1`: `transformers`가 설치돼 있으면 영문 제목 감성에 ProsusAI/finbert(CC BY-NC-SA 4.0, 비상업용)를 사용합니다. 기본 설치에는 포함하지 않았습니다.
 - `MI_DATA_DIR=/path`: 데이터 디렉터리 변경(테스트·격리용). 가격 수집기 출력(`markets.json`)도 이 디렉터리에 씁니다.
 - 선택 의존성: `make setup-optional`(= `requirements-optional.txt`: `briefing --llm`용 `anthropic`, UI 스모크용 `playwright`).
+
+### KRX API 키
+
+키는 **저장소 밖의 파일 하나**에만 둡니다. 코드·JSON·`data/`·커밋에는 넣지 않습니다.
+
+```sh
+mkdir -p ~/.config/mi && chmod 700 ~/.config/mi
+printf 'export KRX_API_KEY=%s\n' '여기에_발급받은_키' > ~/.config/mi/env   # 직접 터미널에서 입력
+chmod 600 ~/.config/mi/env
+```
+
+- `scripts/mi_cli.py`(수동 실행)와 `scripts/cron_run.sh`(cron)가 이 파일을 자동으로 읽습니다. 다른 경로를 쓰려면 `MI_ENV_FILE=<경로>`를 지정합니다.
+- 파일이 본인 소유가 아니거나 권한이 600이 아니면 읽지 않습니다. 이때 수동 실행은 경고를 출력하고, cron 실행은 실행을 거부합니다.
+- `mi_cli.py`는 `KRX_API_KEY`, `ANTHROPIC_API_KEY` 두 줄만 읽고 셸 코드로 실행하지 않습니다. 이미 `export`한 값이 있으면 그 값이 우선합니다.
+- v0.2 수집기를 직접 실행할 때(`python3 scripts/collect_data.py`)는 같은 터미널에서 `export KRX_API_KEY=...`를 하거나 `set -a; . ~/.config/mi/env; set +a`로 불러옵니다.
+- 확인: `python3 scripts/collect_data.py --check-krx 2026-10-14`
 
 ### 라이선스가 확인된 가격 데이터로 예측 활성화
 
@@ -171,6 +188,18 @@ KRX OPEN API (키 필요) ───────┤                              
 - 학습 가능한 평균회귀 신호가 있는 경우, 로지스틱·LightGBM이 기준 모델 대비 log loss 개선 CI 하한 ≈ 0.09로 검증을 통과했습니다.
 - 합성 결과는 `data/`에 저장되지 않으며 화면에 실제 성능으로 표시되지 않습니다.
 
+### 전일 대비 변화 (ROADMAP v0.4 Daily Market Intelligence)
+
+- `mi/daily.py`가 시장마다 현재 상태와 **전 거래일 상태**를 비교합니다. 전 거래일 상태(`regime.analyze`의 `previous`)는 그날까지의 데이터로만 계산하므로, 하루 전에 실행했을 때의 결과와 같습니다(테스트로 확인).
+- 기준값은 2026-10-15에, 결과를 보기 전에 고정했습니다(`daily-v1`). 바꾸면 방법 버전을 올립니다.
+  - 국면 변경, 새 원시 신호(전환 대기 n/3일), 위험 등급 경계 통과
+  - 위험 점수 ±10점 이상. **구성요소 집합이 같은 날끼리만** 비교하고, 다르면 "구성요소 변경 · 점수 비교 불가"로 표시합니다.
+  - 추세 점수 ±2 이상, 20일 변동성 백분위 0.70선 통과
+  - 미국 10년물 금리 ±10bp, USD/KRW ±1% (전 관측일 대비)
+- **화면:** Regime 카드에 "전일 대비" 목록과 "국면 판정 근거"(규칙별 값·변동성 백분위·전환 진행도)가 나옵니다. 브리핑 맨 앞에는 "0 · Daily Summary"가 나옵니다.
+- **스냅샷:** `daily_snapshots` 테이블(스키마 v3)에 그날 보여준 결과를 추가 전용으로 남깁니다. 같은 날 같은 내용은 한 번만 저장하고, 데이터 수정으로 내용이 바뀌면 새 행으로 추가합니다. FRED 시장은 라벨만 저장하고 수치는 저장하지 않습니다. 계산에는 쓰지 않는 감사 기록입니다.
+- **마이그레이션:** 데이터가 있는 기존 DB는 스키마를 올리기 전에 `data/backups/`로 자동 백업합니다.
+
 ## D. Data Sources & 라이선스
 
 2026-10-15에 각 약관 페이지를 직접 확인했습니다. 법률 자문이 아니며, 확인되지 않은 권한은 허용으로 보지 않습니다. 같은 표가 대시보드 Model Performance / System Status 탭에 표시됩니다(`scripts/mi/licenses.py`).
@@ -179,7 +208,7 @@ KRX OPEN API (키 필요) ───────┤                              
 | --- | --- | --- | --- | --- | --- | --- |
 | S&P DJI via FRED · SP500 | [FRED legal](https://fred.stlouisfed.org/legal/) | 조건부 | 불가 | **불가** | 불가 | FRED: "development or training of any … machine learning" 금지, 저장·캐시·보관 금지. S&P 사전 서면 허가 필요 |
 | Nasdaq via FRED · NASDAQ100 | 동일 | 조건부 | 불가 | **불가** | 불가 | "Copyrighted: Pre-Approval Required" |
-| KRX OPEN API · KOSPI/KOSDAQ | [이용약관](https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO002.jsp) | 허용(키) | 조건부 | 불명확 → 불허 처리 | 불가 | 비상업적 이용만, 제3자 제공 금지, 계약 종료 후 사용 불가 |
+| KRX OPEN API · KOSPI/KOSDAQ | [이용약관](https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO002.jsp) | 허용(키) | 조건부 | 허용: 약관에 ML 조항이 없고, 이용 신청 목적을 연구·머신러닝으로 기재해 승인받음(사용자 확인 2026-10-15, `licenses.SOURCES['krx_openapi'].ml_basis`) | 불가 | 비상업적 이용만, 제3자 제공 금지, 계약 종료 후 사용 불가 |
 | Federal Reserve Board · H.15 / H.10 (DDP) | [disclaimer](https://www.federalreserve.gov/disclaimer.htm) | 허용 | 허용 | 허용 | 허용(출처 표기) | 공공 도메인. H.10은 주간 게시 |
 | Cboe via FRED · VIXCLS | FRED legal | 조건부 | 불가 | 불가 | 불명확 | 기본 비활성 (옵트인 표시 전용) |
 | ICE via FRED · HY/IG OAS | FRED legal | 조건부 | 불가 | 불가 | 불가 | 기본 비활성 (옵트인 표시 전용) |
@@ -202,7 +231,8 @@ Copyright © S&P Dow Jones Indices LLC / Nasdaq, Inc. / Korea Exchange. 데이�
 ```sh
 make test      # 또는 아래 세 명령
 cd scripts && python3 test_data.py                                            # v0.2: 12 tests OK
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 65 tests OK
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 78 tests OK
+node --test scripts/test_intel.mjs                                            # intel.js: 6 tests OK
 node --check real-data.js && node --check intel.js                            # OK
 MI_CHROMIUM=<chromium> .venv/bin/python scripts/ui_smoke.py                    # 24 views, 2 widths: OK
 ```
@@ -237,7 +267,6 @@ UI 스모크(headless Chromium)는 REAL/DEMO × 6탭 × 2시장 × 3기간 × �
 - **자동 실행:** 컴퓨터가 켜져 있어야 합니다.
 - **향후 과제:**
   - 라이선스 데이터 확보 후 실제 holdout 평가
-  - KRX ML 이용 가능 여부를 KRX에 서면으로 문의
   - 한국은행 ECOS(공공데이터법상 출처 표기 조건) 연동 검토
   - 필터링 전용 HMM(라이선스 데이터에 한해)
   - 뉴스 피처의 추가 성능 검증

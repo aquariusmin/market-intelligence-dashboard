@@ -44,6 +44,7 @@ test:             ## offline unit tests (v0.2 stdlib + v1.0 engine) and JS synta
 	cd scripts && python3 test_data.py
 	cd scripts && $(ABS_PY) -m unittest test_mi_forecasting test_mi_analysis test_mi_cli
 	node --check real-data.js && node --check intel.js
+	node --test scripts/test_intel.mjs
 
 test-ui:          ## headless browser smoke test (needs playwright in .venv)
 	MI_CHROMIUM=$(CHROMIUM) $(PY) scripts/ui_smoke.py

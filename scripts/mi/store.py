@@ -4,6 +4,7 @@ Plain SQL (no SQLite-only types beyond TEXT/REAL/INTEGER) so the schema ports to
 """
 import json
 import sqlite3
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -55,11 +56,17 @@ CREATE TABLE IF NOT EXISTS briefings (
 CREATE TABLE IF NOT EXISTS holdout_registry (
   market TEXT NOT NULL, horizon INTEGER NOT NULL, holdout_start TEXT NOT NULL, fixed_at TEXT NOT NULL,
   PRIMARY KEY (market, horizon));
+CREATE TABLE IF NOT EXISTS daily_snapshots (
+  market TEXT NOT NULL, as_of TEXT NOT NULL, method TEXT NOT NULL, created_at TEXT NOT NULL,
+  source_id TEXT NOT NULL, regime TEXT NOT NULL, risk_level TEXT, restricted INTEGER NOT NULL,
+  payload TEXT NOT NULL, payload_hash TEXT NOT NULL,
+  UNIQUE (market, as_of, method, payload_hash));
 CREATE TABLE IF NOT EXISTS job_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, started_at TEXT NOT NULL,
   finished_at TEXT, status TEXT NOT NULL, message TEXT);
 """
-SCHEMA_VERSION = 2  # PRAGMA user_version; bump with an explicit migration step in _migrate()
+ARCHIVE_TABLES = ('prices', 'macro', 'forecasts', 'backtest_runs', 'news', 'briefings', 'job_runs')
+SCHEMA_VERSION = 3  # PRAGMA user_version; bump with an explicit migration step in _migrate()
 BUSY_TIMEOUT_S = 60
 STALE_JOB_HOURS = 6
 
@@ -104,9 +111,50 @@ def _migrate(conn):
     (CREATE IF NOT EXISTS); column changes to existing tables must be added here as ALTER steps."""
     version = conn.execute('PRAGMA user_version').fetchone()[0]
     if version < SCHEMA_VERSION:
-        # v1 -> v2: holdout_registry table (created by SCHEMA above); no column changes.
+        # an archive that already holds data (any older version, including unversioned v1 files) is copied first
+        if any(conn.execute('SELECT 1 FROM %s LIMIT 1' % t).fetchone() for t in ARCHIVE_TABLES):
+            backup(conn, suffix='pre-v%d' % SCHEMA_VERSION)
+        # v1 -> v2: holdout_registry table; v2 -> v3: daily_snapshots table (both created by SCHEMA above).
         conn.execute('PRAGMA user_version = %d' % SCHEMA_VERSION)
         conn.commit()
+
+
+def backup(conn, suffix=None):
+    """Online copy of the open database to data/backups/ (0600). Never deletes older backups."""
+    src = Path(conn.execute('PRAGMA database_list').fetchone()[2] or '')
+    if not src.name:
+        return None
+    folder = src.parent / 'backups'
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    dest = folder / ('%s-%s%s.sqlite' % (src.stem, stamp, '-' + suffix if suffix else ''))
+    with sqlite3.connect(dest) as out:
+        conn.backup(out)
+    out.close()
+    dest.chmod(0o600)
+    return dest
+
+
+def storage_report(conn):
+    """Integrity, size and row counts for status.json."""
+    src = Path(conn.execute('PRAGMA database_list').fetchone()[2] or '')
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                                          "ORDER BY name")]
+    backups = sorted((src.parent / 'backups').glob(src.stem + '-*.sqlite')) if src.name else []
+    return {'integrity': conn.execute('PRAGMA quick_check').fetchone()[0],
+            'schema_version': conn.execute('PRAGMA user_version').fetchone()[0],
+            'size_bytes': src.stat().st_size if src.name and src.exists() else None,
+            'rows': {t: conn.execute('SELECT COUNT(*) FROM "%s"' % t).fetchone()[0] for t in tables},
+            'backups': len(backups), 'last_backup': backups[-1].name if backups else None}
+
+
+def save_daily(conn, row):
+    """Append-only, idempotent: the same payload for the same day is stored once; a revised payload is added."""
+    cur = conn.execute('INSERT OR IGNORE INTO daily_snapshots (market, as_of, method, created_at, source_id, regime, '
+                       'risk_level, restricted, payload, payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                       (row['market'], row['as_of'], row['method'], now_utc(), row['source_id'], row['regime'],
+                        row['risk_level'], row['restricted'], row['payload'], row['payload_hash']))
+    return cur.rowcount == 1
 
 
 def holdout_start(conn, market, horizon):

@@ -7,11 +7,13 @@
   forecast   resolve pending outcomes + live forecast -> data/dashboard/forecast.json
   news       v0.7 news metadata + classification    -> data/dashboard/news.json
   briefing   v0.8 Korean daily briefing             -> data/dashboard/briefing.json
-  status     system status                          -> data/dashboard/status.json
+  status     system status (+ SQLite integrity)     -> data/dashboard/status.json
+  backup     online copy of data/mi.sqlite         -> data/backups/ (never deletes old copies)
   morning | evening | weekly | all   composite jobs (see README schedule)
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import traceback
@@ -21,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer from v0.2)
-from mi import VERSION, briefing, events, forecasting, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, briefing, daily, events, forecasting, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
 FRED_RISK_TTL = timedelta(days=3)   # display-only FRED snapshot: ignored and removed once older than this
@@ -105,11 +107,19 @@ def cmd_regime(args):
             s = prices.series(conn, m, snap)
             r = regime.analyze(m, s['rows'], mrows)
             r.update(source_id=s['source_id'], data_status=s['status'], data_error=s.get('error'))
+            r['daily'] = daily.market_block(r)
             out['markets'][m] = r
             print('%s: %s' % (m, r.get('regime') or r.get('status')))
+        series = regime.global_risk(mrows)
+        out['daily'] = {'method': daily.METHOD, 'thresholds': daily.THRESHOLDS, 'macro_changes': daily.macro_changes(series)}
+        restricted = restricted_markets(out['markets'])
+        saved = sum(store.save_daily(conn, daily.snapshot(m, r, m in restricted))
+                    for m, r in out['markets'].items() if r.get('status') == 'ok')
+        conn.commit()
         write('regime.json', out)
-        write('macro.json', {'generated_at': store.now_utc(), 'series': regime.global_risk(mrows)})
-        res['message'] = ', '.join('%s=%s' % (m, r.get('regime') or r['status']) for m, r in out['markets'].items())
+        write('macro.json', {'generated_at': store.now_utc(), 'series': series})
+        res['message'] = ', '.join('%s=%s' % (m, r.get('regime') or r['status']) for m, r in out['markets'].items()) + \
+            '; daily snapshots added %d' % saved
 
 
 def cmd_train(args):
@@ -194,16 +204,17 @@ def restricted_markets(regimes):
 
 def cmd_briefing(args):
     with store.job('briefing') as res, store.connect() as conn:
-        reg = (read('regime.json') or {}).get('markets', {})
+        reg_file = read('regime.json') or {}
+        reg, macro_changes = reg_file.get('markets', {}), (reg_file.get('daily') or {}).get('macro_changes')
         mac = (read('macro.json') or {}).get('series', {})
         fc = read('forecast.json') or {}
         nw = (read('news.json') or {}).get('items', [])
         ev = events.upcoming()
         prev, now = prev_forecast_changes(conn), datetime.now(timezone.utc)
-        brief = briefing.build(reg, mac, fc, nw, ev, prev, session=args.session, now=now)
+        brief = briefing.build(reg, mac, fc, nw, ev, prev, session=args.session, now=now, macro_changes=macro_changes)
         # the archived copy (and the LLM input) carries no numbers derived from sources that may not be stored
         kept = briefing.build(reg, mac, fc, nw, ev, prev, session=args.session, now=now,
-                              restricted=restricted_markets(reg))
+                              restricted=restricted_markets(reg), macro_changes=macro_changes)
         llm_status = 'not requested'
         if args.llm:
             brief, llm_status = briefing.llm_rewrite(brief, facts_brief=kept)
@@ -254,8 +265,15 @@ def cmd_status(args):
                      'stored': conn.execute('SELECT COUNT(*) FROM news').fetchone()[0]},
             'jobs': jobs, 'last_jobs': {n: last(n) for n in ('ingest', 'regime', 'train', 'forecast', 'news', 'briefing')},
             'licenses': licenses.registry(),
+            'storage': store.storage_report(conn),
         }
     write('status.json', status)
+
+
+def cmd_backup(args):
+    with store.connect() as conn:
+        dest = store.backup(conn)
+    print('backup: %s' % dest)
 
 
 def run_stage(name, args):
@@ -285,11 +303,39 @@ def run_all(names, args):
 
 
 COMMANDS = {'ingest': cmd_ingest, 'regime': cmd_regime, 'train': cmd_train, 'forecast': cmd_forecast,
-            'news': cmd_news, 'briefing': cmd_briefing, 'status': cmd_status}
+            'news': cmd_news, 'briefing': cmd_briefing, 'status': cmd_status, 'backup': cmd_backup}
 COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'evening': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'weekly': ['ingest', 'regime', 'train', 'forecast'],
              'all': ['ingest', 'regime', 'train', 'forecast', 'news', 'briefing']}
+
+
+SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY')
+
+
+def load_env_file(path=None):
+    """Read KRX_API_KEY / ANTHROPIC_API_KEY from ~/.config/mi/env (or MI_ENV_FILE) when not already exported.
+    Lines are parsed as KEY=VALUE (an optional `export ` prefix and quotes are allowed); nothing is executed.
+    The file must be owned by the current user and not group/other readable or writable. Returns loaded names."""
+    path = Path(path or os.environ.get('MI_ENV_FILE') or Path.home() / '.config' / 'mi' / 'env')
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    if st.st_uid != os.getuid() or st.st_mode & 0o077:
+        print('env file ignored (%s): must be owned by you with mode 600 (chmod 600 %s)' % (path, path), file=sys.stderr)
+        return []
+    loaded = []
+    for line in path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if line.startswith('export '):
+            line = line[7:].strip()
+        key, sep, value = line.partition('=')
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if sep and key in SECRET_VARS and value and not os.environ.get(key):
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def main(argv=None):
@@ -304,6 +350,7 @@ def main(argv=None):
     p.add_argument('--session', choices=['morning', 'evening'])
     p.add_argument('--bootstrap', type=int, help='train: bootstrap replicates (default 500)')
     args = p.parse_args(argv)
+    load_env_file()   # names only are ever printed; values stay in this process and its children
     paths.DASHBOARD.mkdir(parents=True, exist_ok=True)
     if args.command in COMPOSITE:
         if args.command in ('morning', 'evening') and not args.session:

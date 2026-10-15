@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import briefing, events, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import briefing, daily, events, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -479,6 +479,144 @@ class EventsBriefingTest(unittest.TestCase):
         briefing.llm_rewrite(b, spy, facts_brief=facts)
         self.assertIn('REDACTED VIEW', spy.seen)   # the model sees the restricted copy, not the display copy
         self.assertNotIn(b['sections']['us_overview'][0], spy.seen)
+
+
+class DailyTest(unittest.TestCase):
+    """v0.4 day-over-day changes: thresholds fixed in mi.daily (2026-10-15)."""
+
+    def state(self, regime_='Bullish / Low Volatility', raw=None, trend=4, score=30.0, level=('Moderate', '보통'),
+              comps=None, vol=0.5):
+        return {'as_of': '2026-10-14', 'regime': regime_, 'raw_regime': raw or regime_, 'trend_score': trend,
+                'vol20_pct': vol, 'risk': {'score': score, 'level': level[0], 'level_ko': level[1],
+                                           'components': comps or {'realized_vol': .3, 'drawdown': .1, 'rates': .5}}}
+
+    def kinds(self, prev, cur, **kw):
+        return [c['kind'] for c in daily.diff(prev, cur, **kw)]
+
+    def test_no_change_and_threshold_edges(self):
+        self.assertEqual(daily.diff(self.state(), self.state()), [])
+        self.assertEqual(self.kinds(self.state(score=30.0), self.state(score=39.9)), [])
+        self.assertEqual(self.kinds(self.state(score=30.0), self.state(score=40.0)), ['risk_score'])
+        self.assertEqual(self.kinds(self.state(trend=4), self.state(trend=3)), [])
+        self.assertEqual(self.kinds(self.state(trend=4), self.state(trend=2)), ['trend'])
+        self.assertEqual(self.kinds(self.state(vol=0.69), self.state(vol=0.70)), ['volatility'])
+        self.assertEqual(daily.diff(None, self.state()), [])
+
+    def test_regime_band_and_pending_signal(self):
+        prev = self.state()
+        cur = self.state(regime_='Sideways / Neutral', level=('Elevated', '높음'), score=31)
+        self.assertEqual(self.kinds(prev, cur), ['regime', 'risk_band'])
+        pending = self.state(raw='Bearish / Low Volatility')
+        got = daily.diff(prev, pending, pending_days=1, confirm_days=3)
+        self.assertEqual([c['kind'] for c in got], ['signal'])
+        self.assertIn('전환 대기 1/3일', got[0]['text'])
+
+    def test_component_set_change_is_not_compared_as_a_score_move(self):
+        prev = self.state(score=30.0)
+        cur = self.state(score=60.0, comps={'realized_vol': .3, 'drawdown': .1, 'rates': .5, 'vix': .9})
+        got = daily.diff(prev, cur)
+        self.assertEqual([c['kind'] for c in got], ['risk_components'])
+        self.assertIn('추가: VIX', got[0]['text'])
+
+    def test_plain_text_has_no_price_derived_numbers(self):
+        prev, cur = self.state(score=20.0, trend=5, vol=0.5), self.state(score=45.5, trend=1, vol=0.8)
+        for c in daily.diff(prev, cur):
+            self.assertNotIn('45.5', c['plain'])
+            self.assertNotIn('0.80', c['plain'])
+            self.assertNotIn('+1', c['plain'])
+
+    def test_analyze_previous_state_is_point_in_time(self):
+        d = bdays(320)
+        close = walk(320, 5)
+        r = regime.analyze('sp', rows(d, close), {})
+        cut = regime.analyze('sp', rows(d[:-1], close[:-1]), {})
+        prev = r['previous']
+        self.assertEqual(prev['as_of'], cut['as_of'])            # yesterday's state, as computed yesterday
+        self.assertEqual(prev['regime'], cut['regime'])
+        self.assertEqual(prev['risk']['score'], cut['risk']['score'])
+        self.assertEqual(prev['trend_score'], cut['trend_score'])
+        self.assertEqual(len(r['trend_rules']), 5)
+        self.assertTrue(all(isinstance(t['value'], float) for t in r['trend_rules']))
+        self.assertGreaterEqual(r['pending_days'], 0)
+        block = daily.market_block(r)
+        self.assertEqual(block['previous_as_of'], cut['as_of'])
+        self.assertTrue(block['explanation'][0].startswith('추세 점수'))
+        self.assertIsNone(daily.market_block({'status': 'unavailable'}))
+
+    def test_pending_days(self):
+        B, S = 'Bullish / Low Volatility', 'Sideways / Neutral'
+        self.assertEqual(regime._pending_days([B, B, S, S], B), 2)
+        self.assertEqual(regime._pending_days([B, S, B], B), 0)
+        self.assertEqual(regime._pending_days([], B), 0)
+
+    def test_macro_changes(self):
+        h = lambda a, b: {'history': [{'date': '2026-10-08', 'value': a}, {'date': '2026-10-09', 'value': b}]}
+        self.assertEqual(daily.macro_changes({'UST10Y': h(4.00, 4.09), 'USDKRW': h(1300, 1312)}), [])
+        got = daily.macro_changes({'UST10Y': h(4.00, 4.10), 'USDKRW': h(1300, 1313)})
+        self.assertEqual(len(got), 2)
+        self.assertIn('+10bp', got[0])
+        self.assertIn('+1.00%', got[1])
+
+    def test_snapshot_idempotent_revision_appended_and_restricted_payload(self):
+        r = regime.analyze('ks', rows(bdays(320), walk(320, 6)), {})
+        r.update(source_id='krx_openapi', daily=daily.market_block(r))
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / 'mi.sqlite'
+            with store.connect(db) as conn:
+                self.assertTrue(store.save_daily(conn, daily.snapshot('ks', r)))
+                self.assertFalse(store.save_daily(conn, daily.snapshot('ks', r)))       # same day, same payload
+                revised = json.loads(json.dumps(r))
+                revised['risk']['score'] = (r['risk']['score'] or 0) + 1
+                self.assertTrue(store.save_daily(conn, daily.snapshot('ks', revised)))  # revision kept as a new row
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM daily_snapshots').fetchone()[0], 2)
+        kept = json.loads(daily.snapshot('sp', dict(r, source_id='fred_sp500'), restricted=True)['payload'])
+        self.assertEqual(set(kept), {'regime', 'raw_regime', 'risk_level', 'components_available', 'changes'})
+        full = json.loads(daily.snapshot('ks', r)['payload'])
+        self.assertIn('risk_score', full)
+
+    def test_briefing_uses_daily_changes_and_summary(self):
+        r = regime.analyze('sp', rows(bdays(320), walk(320, 3)), {})
+        r['daily'] = {'previous_as_of': '2026-10-13', 'changes': [daily._change('risk_score', '위험 점수 20.0 → 31.0 (+11.0)',
+                                                                                '위험 점수 10점 이상 상승')],
+                      'explanation': []}
+        shown = briefing.build({'sp': r}, {}, {}, [], {'items': []}, macro_changes=['미국 10년물 금리 전 관측일 대비 +12bp'])
+        kept = briefing.build({'sp': r}, {}, {}, [], {'items': []}, restricted={'sp'}, macro_changes=[])
+        self.assertIn('S&P 500 위험 점수 20.0 → 31.0 (+11.0)', shown['sections']['outlook_changes'])
+        self.assertIn('S&P 500 위험 점수 10점 이상 상승', kept['sections']['outlook_changes'])
+        self.assertIn('변화 1건', shown['sections']['daily_summary'][0])
+        self.assertIn('+12bp', shown['sections']['daily_summary'][-1])
+        self.assertNotIn('점 ·', kept['sections']['daily_summary'][0])   # no risk score for a restricted market
+        self.assertIn('기준 이상 변화 없음', kept['sections']['daily_summary'][-1])
+
+
+class StorageTest(unittest.TestCase):
+    def test_empty_new_archive_is_not_backed_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with store.connect(Path(tmp) / 'mi.sqlite'):
+                pass
+            self.assertFalse((Path(tmp) / 'backups').exists())
+
+    def test_migration_of_existing_archive_backs_up_first_and_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / 'mi.sqlite'
+            import sqlite3
+            with sqlite3.connect(db) as raw:      # an unversioned (v1) archive with data
+                raw.execute("CREATE TABLE job_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, "
+                            "started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, message TEXT)")
+                raw.execute("INSERT INTO job_runs (job, started_at, status) VALUES ('ingest', 'x', 'ok')")
+            raw.close()
+            with store.connect(db) as conn:
+                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], store.SCHEMA_VERSION)
+                rep = store.storage_report(conn)
+            backups = list((Path(tmp) / 'backups').glob('mi-*-pre-v3.sqlite'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(rep['integrity'], 'ok')
+            self.assertIn('daily_snapshots', rep['rows'])
+            self.assertEqual(rep['backups'], 1)
+            with store.connect(db) as conn:                      # already current: no second backup
+                store.backup(conn)
+            self.assertEqual(len(list((Path(tmp) / 'backups').glob('*.sqlite'))), 2)
 
 
 class JobLogTest(unittest.TestCase):

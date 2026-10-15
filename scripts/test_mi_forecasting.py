@@ -45,9 +45,12 @@ FAST_GRID = {'class_frequency': [{}], 'momentum_rule': [{}], 'logistic_regressio
 
 class GateTest(unittest.TestCase):
     def test_fred_and_unknown_sources_refused(self):
-        for sid in ('fred_sp500', 'fred_nasdaq100', 'krx_openapi', 'fred_vixcls', 'nope'):
+        for sid in ('fred_sp500', 'fred_nasdaq100', 'fred_vixcls', 'nope'):
             self.assertFalse(licenses.ml_allowed(sid, {})[0], sid)
         self.assertTrue(licenses.ml_allowed('fed_h15', {})[0])
+        # KRX: approved for research/ML at application time (user-attested basis recorded in the registry)
+        self.assertTrue(licenses.ml_allowed('krx_openapi', {})[0])
+        self.assertTrue(licenses.SOURCES['krx_openapi']['ml_basis'])
         s = {'sp': {'rows': rows(bdays(300), walk(300, 1)), 'source_id': 'fred_sp500'}}
         with self.assertRaises(dataset.GateError):
             dataset.build('sp', s, {}, 5, {})

@@ -76,6 +76,9 @@ def forecast_lines(forecast):
 def outlook_changes(regimes, prev_forecasts, restricted=()):
     out = []
     for key, r in regimes.items():
+        if r and r.get('status') == 'ok' and r.get('daily'):   # v0.4: thresholds fixed in mi.daily
+            out += ['%s %s' % (NAMES[key], c['plain' if key in restricted else 'text']) for c in r['daily']['changes']]
+            continue
         if not r or r.get('status') != 'ok' or len(r.get('history', [])) < 2:
             continue
         a, b = r['history'][-2], r['history'][-1]
@@ -97,7 +100,27 @@ def _withheld(ok, restricted, key):
             for k, r in ok.items() if k in restricted and r[key]]
 
 
-def build(regimes, macro, forecast, news_items, events, prev_forecasts=None, session=None, now=None, restricted=()):
+def daily_summary(regimes, macro_changes=None, restricted=()):
+    """Per market: regime, risk, number of day-over-day changes; then macro changes. Built only from mi.daily output."""
+    out = []
+    for key in NAMES:
+        r = regimes.get(key)
+        if not r or r.get('status') != 'ok':
+            continue
+        d = r.get('daily') or {}
+        days = '' if key in restricted else ' %d거래일째' % r['regime_days']
+        score = '' if key in restricted or r['risk']['score'] is None else ' %.1f점' % r['risk']['score']
+        n = len(d.get('changes', []))
+        out.append('%s: %s%s · 위험 %s%s · 전일(%s) 대비 %s' % (
+            NAMES[key], REGIME_KO.get(r['regime'], r['regime']), days, r['risk']['level_ko'], score,
+            d.get('previous_as_of') or '—', '변화 %d건 (Outlook Changes 참고)' % n if n else '기준 이상 변화 없음'))
+    if macro_changes is not None:
+        out.append('거시: ' + ('; '.join(macro_changes) if macro_changes else '전 관측일 대비 기준 이상 변화 없음'))
+    return out
+
+
+def build(regimes, macro, forecast, news_items, events, prev_forecasts=None, session=None, now=None, restricted=(),
+          macro_changes=None):
     """`restricted`: markets whose price source may not be stored (licenses.storage_allowed). Their price-derived
     numbers are replaced by labels; this variant is what goes to SQLite and to the optional LLM."""
     now = now or datetime.now(timezone.utc)
@@ -132,6 +155,7 @@ def build(regimes, macro, forecast, news_items, events, prev_forecasts=None, ses
         'generated_at': now.isoformat(timespec='seconds'), 'session': session, 'method': 'rule-based-v1',
         'sections': {
             'executive_summary': ' '.join(summary[:5]),
+            'daily_summary': daily_summary(regimes, macro_changes, restricted),
             'us_overview': [market_paragraph(k, regimes.get(k), k in restricted) for k in ('sp', 'nq')],
             'korea_overview': [market_paragraph(k, regimes.get(k), k in restricted) for k in ('ks', 'kq')] +
                               [s for s in ms if 'USD/KRW' in s],

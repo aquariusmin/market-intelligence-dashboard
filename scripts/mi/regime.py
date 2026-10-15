@@ -18,6 +18,10 @@ TREND_RULES = [
     ('mom20_pos', '20일 모멘텀 > 0', lambda r: r.mom20),
     ('mom60_pos', '60일 모멘텀 > 0', lambda r: r.mom60),
 ]
+# value shown next to each rule (percent): distance or momentum, same sign as the rule test
+RULE_VALUE = {'close_gt_sma50': lambda r: r.dist_sma50, 'close_gt_sma200': lambda r: r.dist_sma200,
+              'sma50_gt_sma200': lambda r: (r.sma50 / r.sma200 - 1) * 100, 'mom20_pos': lambda r: r.mom20,
+              'mom60_pos': lambda r: r.mom60}
 TREND_BULL, TREND_BEAR = 3, -3        # score range -5..+5
 VOL_HIGH_PCT = 0.70                    # 20d vol in top 30% of its trailing 252-day range
 VOL_HIGH_ABS = 20.0                    # fallback (annualised %) when percentile history < 126 obs
@@ -156,6 +160,33 @@ def factors(row, m, market):
     return bull, bear
 
 
+def _num(v, d=4):
+    return None if v is None or not math.isfinite(v) else round(float(v), d)
+
+
+def _state(ts, row, mrow, market):
+    """Comparable point-in-time state of one session (used for the current and the previous session)."""
+    comps = risk_components(row, market, mrow)
+    score, band_en, band_ko = risk_level(comps)
+    return {'as_of': ts.date().isoformat(), 'regime': row.regime, 'raw_regime': row.raw_regime,
+            'trend_score': None if row.trend_score is None or not math.isfinite(row.trend_score) else int(row.trend_score),
+            'vol20_pct': _num(row.vol20_pct, 3),
+            'risk': {'score': score, 'level': band_en, 'level_ko': band_ko,
+                     'components': {k: _num(v, 3) for k, v in comps.items()}}}
+
+
+def _pending_days(raw, confirmed):
+    """Consecutive sessions the latest raw label has persisted while the confirmed regime differs."""
+    if not raw or raw[-1] is None or raw[-1] == confirmed:
+        return 0
+    n = 0
+    for lab in reversed(raw):
+        if lab != raw[-1]:
+            break
+        n += 1
+    return n
+
+
 def analyze(market, price_rows, macro_rows, history_len=260):
     """price_rows: [{'date','close'}] chronological. Returns JSON-ready dict."""
     if len(price_rows) < 2:
@@ -184,15 +215,23 @@ def analyze(market, price_rows, macro_rows, history_len=260):
         prev = lab
     since = transitions[-1]['date'] if transitions else valid.index[0].date().isoformat()
     bull, bear = factors(last, mlast, market)
-    num = lambda v, d=4: None if v is None or not math.isfinite(v) else round(float(v), d)
+    num = _num
     tail = valid.iloc[-history_len:]
+    prev = None
+    if len(df) >= 2 and df.iloc[-2].regime is not None:
+        prev = _state(df.index[-2], df.iloc[-2], mf.iloc[-2].to_dict(), market)
     _, _, cur_vol, _ = classify_row(last)
     return {
         'market': market, 'status': 'ok', 'as_of': df.index[-1].date().isoformat(), 'observations': len(df),
         'regime': last.regime, 'raw_regime': last.raw_regime, 'confirm_days': CONFIRM_DAYS,
         'trend_score': int(last.trend_score), 'volatility_state': cur_vol,
         'regime_since': since, 'regime_days': int((valid.index > pd.Timestamp(since)).sum()) + 1,
-        'trend_rules': [{'id': k, 'label': lab, 'pass': _sign(fn(last)) > 0} for k, lab, fn in TREND_RULES],
+        'trend_rules': [{'id': k, 'label': lab, 'pass': _sign(fn(last)) > 0, 'value': num(RULE_VALUE[k](last), 2)}
+                        for k, lab, fn in TREND_RULES],
+        'pending_days': _pending_days(labels, last.regime),
+        'vol_basis': {'percentile': num(last.vol20_pct, 3), 'threshold': VOL_HIGH_PCT,
+                      'fallback_abs': not math.isfinite(last.vol20_pct), 'abs_threshold': VOL_HIGH_ABS},
+        'previous': prev,
         'short_term': _short(last), 'medium_term': _medium(last),
         'metrics': {k: num(last[k]) for k in ('close', 'sma20', 'sma50', 'sma200', 'dist_sma20', 'dist_sma50',
                                               'dist_sma200', 'mom5', 'mom20', 'mom60', 'vol20', 'vol60',
