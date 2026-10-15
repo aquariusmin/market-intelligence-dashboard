@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import backfill, briefing, daily, events, explain, nlp_eval, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import backfill, briefing, daily, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -789,6 +789,106 @@ class NlpEvalTest(unittest.TestCase):
         self.assertAlmostEqual(r['per_class']['positive']['recall'], 60 / 70)
         self.assertEqual(r['per_class']['negative']['f1'], None)                   # no true negatives labelled
         self.assertEqual(r['verdict'], '평가 통과')
+
+
+class TossTest(unittest.TestCase):
+    """Read-only Toss client: allowlist, secrets off argv, no intraday closes, KRX cross-check, ETF targets."""
+
+    def test_only_market_data_paths_and_no_secret_in_argv(self):
+        for bad in ('/api/v1/orders', '/api/v1/accounts', '/api/v1/holdings', '/api/v1/conditional-orders',
+                    '/api/v1/orders/1/cancel', '/api/v1/buying-power', '/api/v1/market-indicators/prices/../../orders'):
+            with self.assertRaises(PermissionError):
+                toss._curl(bad)
+        from subprocess import CompletedProcess
+        seen = {}
+
+        def run(args, input, **kw):
+            seen['args'], seen['config'] = args, input
+            return CompletedProcess(args, 0, '{"access_token": "tok-1", "result": {"candles": []}}\n__TOSS_HTTP_STATUS__:200', '')
+        with patch.dict('os.environ', {'TOSS_CLIENT_ID': 'cid-secret-1', 'TOSS_CLIENT_SECRET': 'csec-secret-2'}), \
+                patch.object(toss.subprocess, 'run', side_effect=run):
+            toss.Client().token()
+            self.assertNotIn('csec-secret-2', ' '.join(seen['args']))
+            self.assertIn('client_secret=csec-secret-2', seen['config'])
+            c = toss.Client()
+            c.get('/api/v1/market-indicators/KOSPI/candles', interval='1d')
+            self.assertNotIn('tok-1', ' '.join(seen['args']))
+            self.assertNotIn('X-Tossinvest-Account', seen['config'])
+            self.assertIn('=https', seen['args'])
+
+    def test_http_error_is_reported_without_secrets(self):
+        from subprocess import CompletedProcess
+        out = CompletedProcess([], 0, '{"error": {"code": "ip-not-allowed"}}\n__TOSS_HTTP_STATUS__:403', '')
+        with patch.object(toss.subprocess, 'run', return_value=out), self.assertRaisesRegex(toss.TossError, '허용 IP'):
+            toss._curl('/api/v1/market-indicators/prices', {'symbols': 'KOSPI'}, token='tok')
+
+    def test_latest_overlay_appends_provisional_close_for_krx_only(self):
+        hist = [{'date': d.isoformat(), 'close': 6000.0 + i} for i, d in enumerate(bdays(30, date(2026, 9, 3)))]
+        snap = {'schema_version': 1, 'markets': {
+            'ks': {'name': 'KOSPI', 'history': hist, 'as_of': hist[-1]['date'], 'value': hist[-1]['close'], 'status': 'ok'},
+            'sp': {'name': 'S&P 500', 'history': hist, 'as_of': hist[-1]['date'], 'value': hist[-1]['close'], 'status': 'ok'}}}
+        nxt = '2026-10-15'
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                store.upsert_prices(conn, 'ks', [(r['date'], r['close']) for r in hist], 'krx_openapi')
+                store.upsert_prices(conn, 'ks', [(nxt, 5554.22)], 'toss_openapi')
+                store.upsert_prices(conn, 'sp', [(nxt, 770.0)], 'toss_etf')
+                out = prices.latest_overlay(conn, snap, 'now')
+        self.assertEqual(list(out), ['ks'])                                  # FRED market is never copied
+        ks = out['ks']
+        self.assertEqual((ks['as_of'], ks['value']), (nxt, 5554.22))
+        self.assertEqual(ks['provisional']['dates'], [nxt])
+        self.assertAlmostEqual(ks['change_pct'], (5554.22 / hist[-1]['close'] - 1) * 100)
+        self.assertEqual(ks['indicators'], collect_data.indicators(hist + [{'date': nxt, 'close': 5554.22}]))
+
+    def test_outcome_waits_for_official_close(self):
+        rows = [{'date': '2026-10-14', 'close': 6008.81}, {'date': '2026-10-15', 'close': 5554.22}]
+        fake = {'rows': rows, 'source_id': 'krx_openapi', 'provisional': ['2026-10-15']}
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'), \
+                patch('mi.prices.target_series', return_value=fake), patch('mi.prices.read_snapshot', return_value=None):
+            with store.connect() as conn:
+                conn.execute("INSERT INTO forecasts (kind, created_at, market, horizon, model_name, model_version, "
+                             "input_cutoff, decision_time_utc, p_bull, p_neutral, p_bear, threshold, base_close, "
+                             "expected_outcome_date, validation_status, status, provenance) VALUES ('live','t','ks',1,"
+                             "'m','v','2026-10-14','t',.4,.3,.3,.01,6008.81,'t','x','pending','{\"target_source\": \"krx_openapi\"}')")
+                self.assertEqual(forecasting.resolve_outcomes(conn, {}), 0)
+                fake['provisional'] = []
+                self.assertEqual(forecasting.resolve_outcomes(conn, {}), 1)
+
+    def test_intraday_candle_is_not_a_close(self):
+        rows = [{'date': '2026-10-14', 'close': 769.6}, {'date': '2026-10-15', 'close': 769.69}]
+        noon_et = datetime(2026, 10, 15, 16, 15, tzinfo=timezone.utc)        # 12:15 EDT, session open
+        self.assertEqual([r['date'] for r in toss.complete('sp', rows, noon_et)], ['2026-10-14'])
+        after = datetime(2026, 10, 15, 20, 16, tzinfo=timezone.utc)          # 16:16 EDT
+        self.assertEqual(len(toss.complete('sp', rows, after)), 2)
+        kr = [{'date': '2026-10-15', 'close': 5554.22}]
+        self.assertEqual(toss.complete('ks', kr, datetime(2026, 10, 15, 6, 40, tzinfo=timezone.utc)), [])   # 15:40 KST
+        self.assertEqual(len(toss.complete('ks', kr, datetime(2026, 10, 15, 6, 46, tzinfo=timezone.utc))), 1)
+
+    def test_sync_crosscheck_provisional_series_and_etf_target(self):
+        class Fake:
+            def daily(self, symbol, since=None, index=False):
+                if symbol == 'KOSPI':
+                    return [{'date': '2026-10-14', 'close': 6008.81}, {'date': '2026-10-15', 'close': 5554.22}]
+                if symbol == 'KOSDAQ':
+                    return [{'date': '2026-10-14', 'close': 823.80}]            # disagrees with KRX 823.88
+                return [{'date': '2026-10-14', 'close': 700.0}, {'date': '2026-10-15', 'close': 701.0}]
+        now = datetime(2026, 10, 15, 23, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                store.upsert_prices(conn, 'ks', [('2026-10-13', 6035.35), ('2026-10-14', 6008.81)], 'krx_openapi')
+                store.upsert_prices(conn, 'kq', [('2026-10-14', 823.88)], 'krx_openapi')
+                rep = toss.sync(conn, Fake(), now=now, log=lambda *a: None)
+                self.assertEqual(rep['crosscheck'], [{'market': 'kq', 'date': '2026-10-14', 'krx': 823.88, 'toss': 823.8}])
+                s = prices.series(conn, 'ks', {'schema_version': 1, 'markets': {}}, {})
+                self.assertEqual(s['rows'][-1], {'date': '2026-10-15', 'close': 5554.22})
+                self.assertEqual(s['provisional'], ['2026-10-15'])
+                self.assertEqual(s['source_id'], 'krx_openapi')
+                t = prices.target_series(conn, 'sp', {'schema_version': 1, 'markets': {}}, {})
+                self.assertEqual((t['source_id'], t['proxy'], len(t['rows'])), ('toss_etf', 'SPY', 2))
+                self.assertEqual(prices.target_series(conn, 'ks', {'schema_version': 1, 'markets': {}}, {})['source_id'],
+                                 'krx_openapi')
+                self.assertTrue(licenses.ml_allowed('toss_etf')[0])
 
 
 class JobLogTest(unittest.TestCase):

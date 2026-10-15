@@ -270,6 +270,7 @@ C1과 C2는 코드 버그가 아닙니다. FRED 약관과 기존 동작(원칙 6
 | S8 | 하위 프로세스·역직렬화 | `shell=True`, `eval`, `pickle`, `yaml.load` 없음. curl 인자는 리스트로 넘기고, 헤더 값의 줄바꿈·따옴표를 거부합니다 | 없음 |
 | S9 | XML 파싱 (RSS) | `xml.etree` + expat 2.7.4(엔티티 확장 공격 방어 내장). 응답은 10MB로 제한(`--max-filesize`) | 없음 |
 | S10 | LLM 경로 | 키는 SDK가 환경변수에서 읽습니다. 예외 메시지는 200자로 자르며, 키를 담지 않습니다. 언론사 제목은 입력하지 않습니다. 출력은 `validate_llm`을 통과해야 합니다 | C2 수정으로 FRED 파생 수치도 입력에서 제외 |
+| S12 | 토스증권 API 토큰 (2026-10-16 추가) | 토큰에 권한 범위가 없어 주문까지 가능 | `mi/toss.py`: 시세 경로 허용 목록(주문·계좌는 요청 전 거부, 테스트), 계좌 헤더 미전송, 키·토큰은 curl stdin, HTTPS 전용, 허용 IP 등록 필수 |
 | S11 | Claude Code 로컬 설정 | `.claude/settings.local.json`(개인 플러그인 설정)이 gitignore에 없었습니다 | **수정:** gitignore 추가 |
 
 **남은 위험(수용):**

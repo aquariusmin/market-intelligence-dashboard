@@ -1,7 +1,7 @@
 /* v1.0 REAL DATA views: regime, forecast, validation, news, briefing, system status.
    Reads data/dashboard/*.json written by scripts/mi_cli.py. Every panel states its source, as-of time and
    status; missing or unlicensed results are shown as unavailable, never replaced with sample values. */
-const intelFiles = ['regime', 'macro', 'forecast', 'performance', 'news', 'briefing', 'status'];
+const intelFiles = ['regime', 'macro', 'forecast', 'performance', 'news', 'briefing', 'status', 'latest'];
 let intel = {}, intelErrors = {};
 // generated_at older than this many days -> STALE badge (performance is retrained rarely, so no threshold)
 const STALE_DAYS = {regime: 3, forecast: 3, briefing: 3, news: 3, status: 3, macro: 7};
@@ -9,7 +9,7 @@ const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 // minimal per-file shape check; a file that fails it is not loaded (the last good copy, if any, is kept)
 const INTEL_SHAPE = {regime: d => isObj(d.markets), macro: d => isObj(d.series), forecast: d => isObj(d.markets),
   performance: d => isObj(d.markets), news: d => Array.isArray(d.items), briefing: d => isObj(d.sections) && Array.isArray(d.sources),
-  status: d => isObj(d.prices)};
+  status: d => isObj(d.prices), latest: d => isObj(d.markets)};
 const FORMAT_ERR = '형식 오류';
 Object.assign(state, {range: '6M', newsCat: 'All', newsMarket: 'all', perfModel: null});
 const H = [1, 5, 20];
@@ -43,7 +43,24 @@ async function loadIntel() {
   }));
 }
 const baseLoad = loadRealData;
-loadRealData = async function () { await Promise.all([baseLoad(), loadIntel()]); render(); };
+loadRealData = async function () { await Promise.all([baseLoad(), loadIntel()]); applyLatest(); render(); };
+// latest.json: same-day closes (Toss, provisional) the v0.2 snapshot does not have yet -> cards, chart, indicators
+function validLatest(L) {
+  const h = L?.history;
+  if (!isObj(L) || !Array.isArray(h) || h.length < 2 || !isObj(L.provisional)) return false;
+  for (let i = 0; i < h.length; i++) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(h[i]?.date) || !Number.isFinite(h[i].close) || h[i].close <= 0 || (i && h[i].date <= h[i - 1].date)) return false;
+  }
+  return L.as_of === h[h.length - 1].date && L.value === h[h.length - 1].close && Number.isFinite(L.change_pct);
+}
+function applyLatest() {
+  const latest = intel.latest?.markets;
+  if (!isObj(latest) || !realData?.markets) return;
+  for (const [k, L] of Object.entries(latest)) {
+    const R = realData.markets[k];
+    if (R && validLatest(L) && L.as_of > (R.as_of || '')) realData.markets[k] = {...R, ...L};
+  }
+}
 
 function missing(name, what) {
   return intel[name] ? '' : `<div class="note neutral">${esc(what)} ${intelErrors[name]?.startsWith(FORMAT_ERR) ? '파일 형식 오류' : '파일 없음'}${intelErrors[name] ? ' (' + esc(intelErrors[name]) + ')' : ''} · <code>.venv/bin/python scripts/mi_cli.py ${name === 'performance' ? 'train' : name === 'macro' ? 'regime' : name}</code> 실행 후 JSON 다시 읽기</div>`;
@@ -93,7 +110,7 @@ bindRealChart = function () {
   const chart = document.querySelector('.pricechart'), tip = document.querySelector('.tooltip');
   if (!chart || !tip || !hasPrices(currentReal())) return;
   const rows = chartRows();
-  const show = i => { i = Math.max(0, Math.min(rows.length - 1, i)); tip.textContent = `${rows[i].date} · 종가 ${number(rows[i].close)} · REAL DATA`; tip.style.display = 'block'; tip.style.left = `${Math.min(55, i / Math.max(rows.length - 1, 1) * 65)}%`; };
+  const show = i => { i = Math.max(0, Math.min(rows.length - 1, i)); tip.textContent = `${rows[i].date} · 종가 ${number(rows[i].close)}${(currentReal()?.provisional?.dates || []).includes(rows[i].date) ? " · 잠정" : ""} · REAL DATA`; tip.style.display = 'block'; tip.style.left = `${Math.min(55, i / Math.max(rows.length - 1, 1) * 65)}%`; };
   const at = e => { const r = chart.getBoundingClientRect(); show(Math.round((e.clientX - r.left) / r.width * (rows.length - 1))); };
   chart.addEventListener('pointermove', at); chart.addEventListener('pointerdown', at);
   chart.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
@@ -164,7 +181,7 @@ function forecastCard() {
     return `<div class="card"><div class="row sectionhead"><h2>Market Forecast</h2>${withFlags('forecast', pill('UNAVAILABLE', 'bad'))}</div><div class="sub">${name} · ${horizon()}거래일 방향 확률을 제공하지 않습니다.</div><ul class="reasons"><li>${esc(f?.reason || '예측 기록 없음')}</li>${g && !g.allowed ? '<li>허용되지 않은 데이터로는 모델을 학습하지 않습니다. ML 학습 권한이 확인된 데이터를 <code>data/licensed/</code>에 등록하면 학습·검증이 활성화됩니다 (README 참고).</li>' : ''}</ul><div class="note">상승·횡보·하락 확률은 라이선스 확인 + 시간순 검증을 통과한 정량 모델에서만 표시됩니다. 임의·샘플 확률로 대체하지 않습니다.</div></div>`;
   }
   const validated = f.status === 'validated';
-  return `<div class="card"><div class="row sectionhead"><h2>Market Forecast</h2>${withFlags('forecast', pill(validated ? 'VALIDATED' : 'NOT VALIDATED', validated ? 'ok' : 'warn'))}</div><div class="sub">${name} · ${f.horizon}거래일 · 기준 종가 ${esc(f.input_cutoff)} · 판정 예정 ${esc(f.expected_outcome_date)} (추정)</div>${f.timely === false ? `<div class="note neutral" style="margin-top:12px;border:0;padding:0">⚠ 늦은 예측 · 기준 종가(${esc(f.input_cutoff)}) 다음 거래일이 이미 개장한 뒤 생성되어 실시간 성과에서 제외됩니다. 한국 시장은 KRX 게시(익일 08:00) 후 개장 전(09:00)에 실행하세요.</div>` : ''}${validated ? '' : `<div class="note neutral" style="margin-top:12px;border:0;padding:0">⚠ 검증 기준 미충족 · 신뢰할 수 있는 예측이 아닙니다.<ul class="reasons">${(f.validation_reasons || []).map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`}<div style="${validated ? '' : 'opacity:.55'}">${probBars(f)}</div>${explainBlock(f.explanation)}<div class="note">모델 ${esc(MODEL_KO[f.model_name] || f.model_name)} · ${esc(f.model_version)}<br>횡보 범위 ±${(f.threshold * 100).toFixed(2)}% (0.43·σ60·√h, 사전 고정) · 대상 데이터 ${esc(f.provenance?.target_source)} · ${genStamp(intel.forecast)}</div></div>`;
+  return `<div class="card"><div class="row sectionhead"><h2>Market Forecast</h2>${withFlags('forecast', pill(validated ? 'VALIDATED' : 'NOT VALIDATED', validated ? 'ok' : 'warn'))}</div><div class="sub">${name} · ${f.horizon}거래일 · 기준 종가 ${esc(f.input_cutoff)} · 판정 예정 ${esc(f.expected_outcome_date)} (추정)</div>${f.provenance?.proxy ? `<div class="note" style="margin-top:10px;border:0;padding:0">ⓘ 지수 대신 추종 ETF <b>${esc(f.provenance.proxy)}</b>의 가격으로 학습·판정한 예측입니다 (지수 데이터는 ML 학습 불가). 지수와 ETF는 배당·보수만큼 차이가 납니다.</div>` : ''}${f.provenance?.provisional_input ? `<div class="note" style="margin-top:10px;border:0;padding:0">ⓘ 기준 종가는 토스증권 당일 시세(잠정치)이며, 다음 날 KRX 공식값으로 확정·대조됩니다.</div>` : ''}${f.timely === false ? `<div class="note neutral" style="margin-top:12px;border:0;padding:0">⚠ 늦은 예측 · 기준 종가(${esc(f.input_cutoff)}) 다음 거래일이 이미 개장한 뒤 생성되어 실시간 성과에서 제외됩니다. 한국 시장은 KRX 게시(익일 08:00) 후 개장 전(09:00)에 실행하세요.</div>` : ''}${validated ? '' : `<div class="note neutral" style="margin-top:12px;border:0;padding:0">⚠ 검증 기준 미충족 · 신뢰할 수 있는 예측이 아닙니다.<ul class="reasons">${(f.validation_reasons || []).map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`}<div style="${validated ? '' : 'opacity:.55'}">${probBars(f)}</div>${explainBlock(f.explanation)}<div class="note">모델 ${esc(MODEL_KO[f.model_name] || f.model_name)} · ${esc(f.model_version)}<br>횡보 범위 ±${(f.threshold * 100).toFixed(2)}% (0.43·σ60·√h, 사전 고정) · 대상 데이터 ${esc(f.provenance?.target_source)} · ${genStamp(intel.forecast)}</div></div>`;
 }
 function overviewForecastCell(k) {
   const f = intel.forecast?.markets?.[k]?.['5'];
@@ -322,6 +339,7 @@ licenseTable = guard('Data Sources & Licences', licenseTable);
 newsIntelView = guard('News Intelligence', newsIntelView, true); statusView = guard('System Status', statusView, true);
 indicatorsView = guard('Market Indicators', indicatorsView, true);
 realView = function () {
+  applyLatest();   // idempotent: newer provisional closes win whichever loader finished last
   const notice = loading ? '<div class="note" role="status">로컬 JSON을 읽고 있습니다…</div>' : loadError ? `<div class="card" role="alert" style="margin-top:18px;border-color:#695735">${esc(loadError)}${realData ? ' · 마지막으로 읽은 정상 JSON을 유지합니다.' : ' · 샘플 데이터로 대체하지 않습니다.'}<div class="sub">로컬 서버 실행 후 <code>.venv/bin/python scripts/mi_cli.py ingest</code> → JSON 다시 읽기</div></div>` : '';
   const views = {Overview: intelOverview, Forecast: intelForecast, Indicators: indicatorsView, 'News Intelligence': newsIntelView, 'Model Performance': perfView, 'System Status': statusView};
   return notice + (views[state.tab] || intelOverview)();

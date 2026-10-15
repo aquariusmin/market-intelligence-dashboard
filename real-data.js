@@ -18,6 +18,7 @@ const currentReal = () => realData?.markets[state.market];
 const hasPrices = m => !!m?.history?.length;
 function availability(m) {
   if (!hasPrices(m)) return '이용 불가';
+  if (m.provisional) return m.provisional.note || '최신 종가 잠정치';
   if (m.status === 'stale') return '수집 실패 · 이전 정상 데이터';
   const age = (Date.now()-Date.parse(m.as_of+'T00:00:00Z'))/86400000;
   return age > 4 ? '4일 이상 경과 · 휴장일 미반영' : '일별 종가 · 실시간 아님';

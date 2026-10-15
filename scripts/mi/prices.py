@@ -74,6 +74,41 @@ def ingest_snapshot(conn, snapshot=None):
     return report
 
 
+ETF_PROXY = {'sp': 'SPY', 'nq': 'QQQ'}
+PROVISIONAL_NOTE = '최신 종가 잠정치 (토스증권) · KRX 공식값은 다음 날 확정'
+
+
+def latest_overlay(conn, snapshot, now_iso):
+    """v0.2-shaped entries for markets whose newest close is a provisional (Toss) row the v0.2 snapshot lacks.
+    History = snapshot history + provisional rows; indicators use the v0.2 formulas. FRED markets never appear."""
+    from collect_data import indicators   # v0.2 formulas, so cards and the Indicators tab stay consistent
+    out = {}
+    for key in MARKETS:
+        base = (snapshot or {}).get('markets', {}).get(key) or {}
+        s = series(conn, key, snapshot, {})
+        new = [r for r in s['rows'] if r['date'] in set(s.get('provisional') or []) and r['date'] > (base.get('as_of') or '')]
+        if not new or not base.get('history'):
+            continue
+        hist = [{'date': r['date'], 'close': r['close']} for r in base['history']] + new
+        out[key] = dict(base, history=hist, value=hist[-1]['close'], as_of=hist[-1]['date'],
+                        change_pct=(hist[-1]['close'] / hist[-2]['close'] - 1) * 100, indicators=indicators(hist),
+                        updated_at=now_iso, provisional={'dates': [r['date'] for r in new], 'note': PROVISIONAL_NOTE})
+    return out
+
+
+def target_series(conn, market, snapshot=None, manifest=None):
+    """Price series a model is trained on and scored against. Same as series(), except for US markets whose
+    index feed may not be used for ML: there the tracking ETF (SPY/QQQ via Toss) is the target, if archived."""
+    manifest = licenses.licensed_manifest() if manifest is None else manifest
+    if market in ETF_PROXY and market not in manifest:
+        rows = store.load_prices(conn, market, 'toss_etf')
+        if rows:
+            return {'rows': [{'date': r['date'], 'close': r['close']} for r in rows], 'source_id': 'toss_etf',
+                    'origin': 'Toss %s (ETF proxy)' % ETF_PROXY[market], 'proxy': ETF_PROXY[market], 'status': 'ok',
+                    'as_of': rows[-1]['date'], 'error': None, 'provisional': []}
+    return series(conn, market, snapshot, manifest)
+
+
 def series(conn, market, snapshot=None, manifest=None):
     """-> dict(rows, source_id, origin, status, error)."""
     manifest = licenses.licensed_manifest() if manifest is None else manifest
@@ -92,7 +127,15 @@ def series(conn, market, snapshot=None, manifest=None):
     if licenses.storage_allowed(cfg['snapshot_source']):
         for r in store.load_prices(conn, market, cfg['snapshot_source']):
             rows.setdefault(r['date'], r['close'])
+    provisional = []
+    if licenses.storage_allowed(cfg['snapshot_source']) and rows:
+        # same KRX index from Toss for sessions KRX has not published yet (next-morning) -> same-day close
+        last = max(rows)
+        for r in store.load_prices(conn, market, 'toss_openapi'):
+            if r['date'] > last:
+                rows[r['date']] = r['close']
+                provisional.append(r['date'])
     merged = [{'date': d, 'close': rows[d]} for d in sorted(rows)]
-    return {'rows': merged, 'source_id': cfg['snapshot_source'], 'origin': 'markets.json',
+    return {'rows': merged, 'source_id': cfg['snapshot_source'], 'origin': 'markets.json', 'provisional': provisional,
             'status': m.get('status', 'unavailable') if merged else 'unavailable',
             'as_of': merged[-1]['date'] if merged else None, 'error': m.get('error')}

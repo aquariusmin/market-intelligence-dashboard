@@ -22,8 +22,9 @@ function load() {
   vm.runInContext(read('index.html').match(/<script>([\s\S]*?)<\/script>/)[1], ctx, {filename: 'index.html'});
   vm.runInContext('render = () => {}', ctx);   // page rendering needs a real DOM (covered by ui_smoke.py)
   for (const f of ['real-data.js', 'intel.js']) vm.runInContext(read(f), ctx, {filename: f});
-  const api = vm.runInContext(`({esc, safeUrl, link, INTEL_SHAPE, flags, dailyChanges, explainBlock, nlpEval, loadIntel,
-    getIntel: () => intel, getErrors: () => intelErrors, setIntel: v => { intel = v; }})`, ctx);
+  const api = vm.runInContext(`({esc, safeUrl, link, INTEL_SHAPE, flags, dailyChanges, explainBlock, nlpEval, applyLatest, loadIntel,
+    getIntel: () => intel, getErrors: () => intelErrors, setIntel: v => { intel = v; },
+    getReal: () => realData, setReal: v => { realData = v; }})`, ctx);
   return {ctx, api};
 }
 
@@ -104,4 +105,19 @@ test('news evaluation line handles missing and present reports', () => {
   const html = api.nlpEval({rule: 'r', category: {verdict: '참고용', n: 12, accuracy: 0.75, macro_f1: 0.5}, sentiment: {verdict: '<i>', n: 0}});
   assert.match(html, /분류 참고용 · 라벨 12개 · 정확도 75%/);
   assert.match(html, /감성 &lt;i&gt;/);
+});
+
+test('latest.json overlays a newer provisional close only when valid and newer', () => {
+  const {api} = load();
+  const base = {as_of: '2026-10-14', value: 6008.81, history: [{date: '2026-10-13', close: 6035.35}, {date: '2026-10-14', close: 6008.81}]};
+  const newer = {as_of: '2026-10-15', value: 5554.22, change_pct: -7.57, provisional: {dates: ['2026-10-15'], note: 'n'},
+    history: [...base.history, {date: '2026-10-15', close: 5554.22}]};
+  api.setReal({markets: {ks: {...base}, kq: {...base}, sp: {...base}}});
+  api.setIntel({latest: {markets: {ks: newer, kq: {...newer, value: 1}, sp: {...newer, as_of: '2026-10-14'}}}});
+  api.applyLatest();
+  const m = api.getReal().markets;
+  assert.equal(m.ks.value, 5554.22);
+  assert.equal(m.ks.provisional.dates[0], '2026-10-15');
+  assert.equal(m.kq.value, 6008.81);        // value != last close -> rejected
+  assert.equal(m.sp.as_of, '2026-10-14');   // not newer -> unchanged
 });

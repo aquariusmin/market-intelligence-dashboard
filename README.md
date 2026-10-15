@@ -5,11 +5,15 @@
 기존 v0.2 화면(HTML/CSS/Vanilla JS)과 DEMO 모드를 그대로 유지하고, 그 위에 Python 분석 엔진(`scripts/mi/`)과 v1.0 화면 레이어(`intel.js`)를 추가했습니다.
 
 > **현재 상태 요약 (2026-10-16 실측)**
-> - 동작: 4개 지수 실제 종가(S&P 500·NASDAQ 100은 FRED, KOSPI·KOSDAQ은 KRX 2016-01-04부터 2,642거래일), 규칙 기반 국면·위험·전일 대비 변화, Fed H.15/H.10 거시지표, Fed·SEC 공식 발표 뉴스, FOMC 일정, 규칙 기반 한국어 브리핑, 시스템 상태.
-> - **방향 예측:** KOSPI·KOSDAQ만 학습합니다(KRX 이용 신청 목적 근거). 6개 조합 중 **KOSDAQ 5거래일(LightGBM)만 사전 고정 기준을 통과**했고, 나머지 5개는 NOT VALIDATED입니다. 통과도 아슬아슬합니다(과거 클래스 빈도 대비 log loss 개선 90% 하한 +0.0003). 6개 조합을 시험한 결과이므로 우연일 가능성이 있고, 실시간 판정이 30건 이상 쌓일 때까지 신뢰를 유보합니다.
-> - S&P 500·NASDAQ 100: FRED 약관상 ML 학습 금지 → 예측 UNAVAILABLE (아래 [데이터 출처](#d-data-sources--라이선스)).
-> - 한국 시장 예측이 실시간 성과에 들어가려면 KRX 게시(익일 08:00) 후 개장(09:00) 전에 실행해야 합니다(cron `morning` 08:30).
-
+> - **데이터:**
+>   - KOSPI·KOSDAQ: KRX 공식 2016-01-04부터 + 토스증권 당일 종가(잠정치, 다음 날 KRX로 확정·대조)
+>   - S&P 500·NASDAQ 100: 화면 표시는 FRED. 예측 학습에는 토스증권 SPY·QQQ ETF 가격을 씁니다
+>   - Fed H.15/H.10 거시지표, Fed·SEC 공식 발표 뉴스, FOMC 일정
+> - **방향 예측 검증 (12개 조합, 2026-10-15 사전 고정 기준):**
+>   - 통과 2개: **NASDAQ 100 1거래일**(QQQ, LightGBM, 클래스 빈도 대비 log loss 개선 90% 하한 +0.015), **KOSDAQ 5거래일**(LightGBM, 하한 +0.0003으로 아슬아슬)
+>   - 나머지 10개는 NOT VALIDATED입니다.
+>   - 12개를 시험해 2개가 통과한 것이라 우연일 가능성이 있습니다. 실시간 판정이 30건 이상 쌓일 때까지 참고용으로만 보세요. 거래 비용은 아직 반영하지 않았습니다.
+> - **자동 갱신:** cron 08:30·16:30(평일)과 일요일 재학습. 16:30 실행은 토스 당일 종가로 한국 예측을 만듭니다.
 ---
 
 ## E. Local Setup Guide
@@ -63,6 +67,25 @@ chmod 600 ~/.config/mi/env
 - `mi_cli.py`는 `KRX_API_KEY`, `ANTHROPIC_API_KEY` 두 줄만 읽고 셸 코드로 실행하지 않습니다. 이미 `export`한 값이 있으면 그 값이 우선합니다.
 - v0.2 수집기를 직접 실행할 때(`python3 scripts/collect_data.py`)는 같은 터미널에서 `export KRX_API_KEY=...`를 하거나 `set -a; . ~/.config/mi/env; set +a`로 불러옵니다.
 - 확인: `python3 scripts/collect_data.py --check-krx 2026-10-14`
+
+### 토스증권 Open API (당일 종가 · 미국 ETF)
+
+KRX는 그날 종가를 다음 날 아침에 게시합니다. 토스증권 Open API를 쓰면 장 마감(15:30) 15분 뒤부터 당일 종가를 받을 수 있습니다.
+
+```sh
+# WTS 설정 > Open API에서 client_id·client_secret 발급 + 허용 IP(집 공인 IP) 등록 후
+printf 'export TOSS_CLIENT_ID=%s\nexport TOSS_CLIENT_SECRET=%s\n' '<id>' '<secret>' >> ~/.config/mi/env
+chmod 600 ~/.config/mi/env
+```
+
+- **동작:** `ingest`(아침·저녁 자동 실행 포함) 때 함께 받습니다.
+  - KOSPI·KOSDAQ: 최근 2주 일봉을 받아, KRX에 아직 없는 날짜를 **잠정치**로 씁니다. 다음 날 KRX 공식값이 들어오면 두 값을 대조하고, 다르면 `observation_revisions`(kind=`crosscheck`)에 기록합니다. 어느 값도 덮어쓰지 않습니다.
+  - SPY·QQQ: 2016년부터 일봉을 받습니다. 처음에만 시장당 약 13회 호출하고, 이후에는 최근분만 받습니다.
+- **미국 예측:** 지수 데이터(FRED)는 ML 학습이 금지되어 있어서, **S&P 500은 SPY, NASDAQ 100은 QQQ 가격**으로 학습하고 판정합니다. 화면의 지수 값은 그대로 FRED이고, 예측 카드에 "추종 ETF 기준"이라고 표시합니다. ETF는 배당·보수만큼 지수와 다릅니다.
+- **장중 가격 배제:** 장 마감 15분 뒤 이전의 일봉(진행 중인 세션)은 종가로 쓰지 않습니다.
+- **보안:** 토스 토큰에는 권한 범위가 없어 주문도 가능합니다. `mi/toss.py`는 시세 경로만 허용 목록으로 호출하고(주문·계좌 경로는 요청 전에 거부), 계좌 헤더를 보내지 않으며, 키·토큰은 curl stdin으로만 전달합니다. 집 공인 IP가 바뀌면 403이 나므로 허용 IP를 다시 등록하세요.
+- **이용 조건 (FAQ 원문):** "투자자 본인의 매매 목적에 한하여 이용", 상업적 이용과 제3자 배포 금지. 받은 데이터는 `data/`에만 저장하고 공개 저장소에 올리지 않습니다. 개인 매매 판단용 모델 학습은 목적 범위 안으로 해석했습니다(`licenses.SOURCES['toss_openapi'|'toss_etf']`).
+- **당일 예측:** 평일 16:30 `evening` 실행이 당일 종가로 한국 예측을 만듭니다. 다음 거래일 개장 전이므로 실시간 성과 집계 대상입니다.
 
 ### KRX 장기 이력 백필 (예측 학습용)
 
@@ -267,8 +290,8 @@ Copyright © S&P Dow Jones Indices LLC / Nasdaq, Inc. / Korea Exchange. 데이�
 ```sh
 make test      # 또는 아래 세 명령
 cd scripts && python3 test_data.py                                            # v0.2: 12 tests OK
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 92 tests OK
-node --test scripts/test_intel.mjs                                            # intel.js: 8 tests OK
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 98 tests OK
+node --test scripts/test_intel.mjs                                            # intel.js: 9 tests OK
 node --check real-data.js && node --check intel.js                            # OK
 MI_CHROMIUM=<chromium> .venv/bin/python scripts/ui_smoke.py                    # 24 views, 2 widths: OK
 ```

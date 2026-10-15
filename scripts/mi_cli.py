@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer from v0.2)
-from mi import VERSION, backfill, briefing, daily, events, forecasting, nlp_eval, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, backfill, briefing, daily, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
 FRED_RISK_TTL = timedelta(days=3)   # display-only FRED snapshot: ignored and removed once older than this
@@ -79,14 +79,24 @@ def cmd_ingest(args):
                 archived, archive_error = None, '%s: %s' % (type(exc).__name__, exc)
                 traceback.print_exc()
             results, transient = macro.collect(conn, with_fred_risk=args.with_fred_risk)
+            toss_rep = None
+            if toss.configured() and not args.skip_prices:
+                try:   # same-day KOSPI/KOSDAQ closes + SPY/QQQ (read-only market data)
+                    toss_rep = toss.sync(conn)
+                except Exception as exc:
+                    toss_rep = {'error': '%s: %s' % (type(exc).__name__, exc)}
+                    traceback.print_exc()
         if transient:
             write('fred_risk.json', {'note': '표시 전용 스냅샷 (보관 아님) · 사용자 옵트인 --with-fred-risk',
                                      'fetched_at': store.now_utc(), 'series': transient})
         elif OUT('fred_risk.json').exists() and not args.with_fred_risk:
             OUT('fred_risk.json').unlink()  # opt-in withdrawn: drop the display snapshot
         write('ingest.json', {'ran_at': store.now_utc(), 'price_collector_exit': code, 'archive': archived,
-                              'archive_error': archive_error, 'macro': results})
+                              'archive_error': archive_error, 'macro': results, 'toss': toss_rep})
         failed = [k for k, v in results.items() if v['status'] in ('stale', 'unavailable')]
+        failed += ['toss:' + m for m, v in ((toss_rep or {}).get('markets') or {}).items() if v.get('status') != 'ok']
+        if toss_rep and toss_rep.get('error'):
+            failed.append('toss')
         res['status'] = 'ok' if code == 0 and not failed and not archive_error else 'partial'
         res['message'] = 'prices exit %s; archive %s; macro failed: %s' % (
             code, 'error' if archive_error else 'ok', ','.join(failed) or 'none')
@@ -120,6 +130,7 @@ def cmd_regime(args):
         conn.commit()
         write('regime.json', out)
         write('macro.json', {'generated_at': store.now_utc(), 'series': series})
+        write('latest.json', {'generated_at': store.now_utc(), 'markets': prices.latest_overlay(conn, snap, store.now_utc())})
         res['message'] = ', '.join('%s=%s' % (m, r.get('regime') or r['status']) for m, r in out['markets'].items()) + \
             '; daily snapshots added %d' % saved
 
@@ -357,7 +368,7 @@ COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'all': ['ingest', 'regime', 'train', 'forecast', 'news', 'briefing']}
 
 
-SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY')
+SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET')
 
 
 def load_env_file(path=None):

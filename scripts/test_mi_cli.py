@@ -136,13 +136,13 @@ class CliTest(unittest.TestCase):
 
     def test_env_file_loads_only_known_keys_and_requires_owner_only_mode(self):
         env = Path(self.tmp.name) / 'env'
-        env.write_text('export KRX_API_KEY="k-123"\nANTHROPIC_API_KEY=a-456\nPATH=/evil\n$(touch pwned)\n')
+        env.write_text('export KRX_API_KEY="k-123"\nANTHROPIC_API_KEY=a-456\nexport TOSS_CLIENT_ID=t-1\nTOSS_CLIENT_SECRET=t-2\nPATH=/evil\n$(touch pwned)\n')
         with patch.dict('os.environ', {'PATH': '/usr/bin'}, clear=True):
             env.chmod(0o644)
             self.assertEqual(mi_cli.load_env_file(env), [])          # readable by others: refused
             self.assertIn('chmod 600', self.err.getvalue())
             env.chmod(0o600)
-            self.assertEqual(mi_cli.load_env_file(env), ['KRX_API_KEY', 'ANTHROPIC_API_KEY'])
+            self.assertEqual(mi_cli.load_env_file(env), ['KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET'])
             import os
             self.assertEqual(os.environ['KRX_API_KEY'], 'k-123')
             self.assertEqual(os.environ['PATH'], '/usr/bin')          # only the two secret names are loaded
@@ -158,7 +158,7 @@ class CliTest(unittest.TestCase):
         from mi import store
         days = pd.bdate_range('2025-06-02', periods=320)
 
-        def series(conn, m, snap):
+        def series(conn, m, snap, manifest=None):
             close = 100 * np.exp(np.cumsum(np.random.default_rng(len(m) + ord(m[0])).normal(0, .01, 320)))
             return {'rows': [{'date': d.date().isoformat(), 'close': float(c)} for d, c in zip(days, close)],
                     'source_id': 'fred_sp500' if m in ('sp', 'nq') else 'krx_openapi', 'status': 'ok'}

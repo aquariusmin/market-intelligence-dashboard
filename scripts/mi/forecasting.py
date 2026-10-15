@@ -38,10 +38,13 @@ def load_inputs(conn, manifest=None, transient_macro=None):
     manifest = licenses.licensed_manifest() if manifest is None else manifest
     snap = prices.read_snapshot()
     series = {m: prices.series(conn, m, snap, manifest) for m in prices.MARKETS}
+    # targets differ from series only for US markets with an ETF proxy; other markets' inputs (cross features)
+    # keep using `series`, so adding a proxy never changes an existing model's feature set
+    targets = {m: prices.target_series(conn, m, snap, manifest) for m in prices.MARKETS}
     macro_rows = {sid: store.load_macro(conn, sid) for sid in MACRO}
     for sid, rows in (transient_macro or {}).items():
         macro_rows[sid] = rows
-    return series, macro_rows, manifest
+    return series, targets, macro_rows, manifest
 
 
 def gate_report(series, manifest):
@@ -65,8 +68,8 @@ def train(conn, markets=None, horizons=dataset.HORIZONS, cfg_overrides=None, man
     bad = sorted(set(cfg_overrides or {}) & set(validation.GATE_FIELDS))  # gate criteria are fixed a priori
     if bad:
         raise ValueError('검증 설정은 사전 고정 · 실행 중 변경 불가: %s' % ', '.join(bad))
-    series, macro_rows, manifest = load_inputs(conn, manifest, transient_macro)
-    gates = gate_report(series, manifest)
+    series, targets, macro_rows, manifest = load_inputs(conn, manifest, transient_macro)
+    gates = gate_report(targets, manifest)
     perf = {'generated_at': store.now_utc(), 'engine_version': VERSION, 'gate': gates, 'markets': {}}
     for m in markets or prices.MARKETS:
         perf['markets'][m] = {}
@@ -74,7 +77,7 @@ def train(conn, markets=None, horizons=dataset.HORIZONS, cfg_overrides=None, man
             if not gates[m]['allowed']:
                 perf['markets'][m][str(h)] = {'status': 'unavailable', 'reason': gates[m]['reason']}
                 continue
-            ds = dataset.build(m, series, macro_rows, h, manifest)
+            ds = dataset.build(m, dict(series, **{m: targets[m]}), macro_rows, h, manifest)
             fixed = store.holdout_start(conn, m, h)
             cfg = validation.Config(horizon=h, holdout_start=fixed or '', **(cfg_overrides or {}))
             log('%s %dD: %d rows, %d features' % (m, h, len(ds['X']), ds['X'].shape[1]))
@@ -144,7 +147,7 @@ def _expected_outcome(cutoff, horizon):
 
 def forecast(conn, perf, markets=None, manifest=None, log=print, transient_macro=None, now=None):
     """Fit the development-chosen primary model on all labelled data and forecast the latest row."""
-    series, macro_rows, manifest = load_inputs(conn, manifest, transient_macro)
+    series, targets, macro_rows, manifest = load_inputs(conn, manifest, transient_macro)
     out = {'generated_at': store.now_utc(), 'markets': {}}
     for m in markets or prices.MARKETS:
         out['markets'][m] = {}
@@ -154,7 +157,7 @@ def forecast(conn, perf, markets=None, manifest=None, log=print, transient_macro
                 out['markets'][m][str(h)] = {'market': m, 'horizon': h, 'status': 'unavailable',
                                              'reason': p.get('reason', '검증된 학습 결과 없음 (train 먼저 실행)')}
                 continue
-            out['markets'][m][str(h)] = _forecast_one(conn, m, h, p, series, macro_rows, manifest, log,
+            out['markets'][m][str(h)] = _forecast_one(conn, m, h, p, dict(series, **{m: targets[m]}), macro_rows, manifest, log,
                                                       now or datetime.now(timezone.utc))
     return out
 
@@ -198,7 +201,8 @@ def _forecast_one(conn, m, h, perf_entry, series, macro_rows, manifest, log, now
            'expected_outcome_note': '주말만 제외한 추정일 · 휴장일 미반영 (실제 판정은 h번째 관측 종가)',
            'threshold': round(float(ds['threshold'].iloc[-1]), 6), 'base_close': float(ds['close'].iloc[-1]),
            'features': {c: (None if not np.isfinite(v) else round(float(v), 4)) for c, v in X.iloc[-1].items()},
-           'provenance': {'target_source': series[m]['source_id'],
+           'provenance': {'target_source': series[m]['source_id'], 'proxy': series[m].get('proxy'),
+                          'provisional_input': X.index[-1].date().isoformat() in (series[m].get('provisional') or []),
                           'feature_sources': sorted(set(ds['feature_sources'].values())),
                           'backtest_run': perf_entry.get('run_id'), 'engine_version': VERSION}}
     if status == 'validated' and n >= 2:   # outcome-change explanation only for a model that passed the gate
@@ -232,7 +236,7 @@ def resolve_outcomes(conn, manifest=None):
     for f in conn.execute("SELECT * FROM forecasts WHERE status = 'pending'").fetchall():
         prov = json.loads(f['provenance'])
         if f['market'] not in cache:
-            cache[f['market']] = prices.series(conn, f['market'], snap, manifest)
+            cache[f['market']] = prices.target_series(conn, f['market'], snap, manifest)
         s = cache[f['market']]
         if s['source_id'] != prov['target_source']:
             continue  # never score a forecast against a different price source
@@ -243,6 +247,8 @@ def resolve_outcomes(conn, manifest=None):
         if i + f['horizon'] >= len(dates):
             continue
         out = s['rows'][i + f['horizon']]
+        if out['date'] in (s.get('provisional') or []):
+            continue  # score only against the official close (KRX publishes the next morning)
         ret = out['close'] / f['base_close'] - 1
         cls = 'bullish' if ret > f['threshold'] else 'bearish' if ret < -f['threshold'] else 'neutral'
         conn.execute("UPDATE forecasts SET status='evaluated', outcome_date=?, actual_return=?, actual_class=?, "

@@ -43,6 +43,7 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | 모듈 | 입력 | 출력 | 비고 |
 |---|---|---|---|
 | `collect_data.py`, `providers.py` | FRED CSV, KRX `idx/{kospi,kosdaq}_dd_trd` | `markets.json` | v0.2 인터페이스를 **변경 금지**. curl을 하위 프로세스로 쓰고, 키는 stdin으로만 넘기고, 재시도는 3회. `--output`으로 경로를 바꿀 수 있음 |
+| `mi/toss.py` | 토스증권 Open API (시세 전용) | `prices` (`toss_openapi`: KOSPI/KOSDAQ 잠정치, `toss_etf`: SPY/QQQ) | 시세 경로만 허용 목록 호출, 계좌 헤더 미전송, 키·토큰 stdin. 진행 중 세션 봉 제외, KRX와 대조(`crosscheck`) |
 | `mi/backfill.py` | KRX OPEN API(기준일별) | `prices`, `krx_calendar` | v0.5 장기 이력. 이어 받기, 하루 예산, 오류 시 중단(진행분 보존). 어제(KST)까지만 요청 |
 | `mi/prices.py` | `markets.json` | `prices` 테이블 | `storage_allowed()`를 통과한 소스만 보관(현재 KRX만). FRED는 읽기만 |
 | `mi/macro.py` | Fed DDP CSV(H.15 3개, H.10 2개). 옵트인 시 FRED VIX·ICE | `macro` 테이블 / `fred_risk.json`(TTL 3일) | 5년 단위로 나눠 받고, 범위를 검사하고, 개정 이력을 기록 |
@@ -168,9 +169,9 @@ dataset.build ─> 개발 구간 ─┬─ fold: fit → purge(h)+embargo → ca
 | 범위 | 파일 | 수 | 실행 |
 |---|---|---|---|
 | v0.2 수집기 | `scripts/test_data.py` | 12 | `python3 test_data.py` (stdlib) |
-| 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 78 | `.venv` unittest |
+| 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 84 | `.venv` unittest |
 | CLI·로컬 서버 | `test_mi_cli.py` | 14 | 같음 |
-| 화면 로직 | `scripts/test_intel.mjs` | 8 | `node --test` (vm으로 index.html 인라인 → real-data.js → intel.js 로드) |
+| 화면 로직 | `scripts/test_intel.mjs` | 9 | `node --test` (vm으로 index.html 인라인 → real-data.js → intel.js 로드) |
 | 브라우저 | `scripts/ui_smoke.py` | 24 뷰 | headless Chromium |
 | 데이터 감사 | `.claude/skills/financial-data-audit/scripts/audit_data.py` | — | 읽기 전용 |
 

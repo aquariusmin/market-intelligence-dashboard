@@ -19,6 +19,7 @@
   - `validation.py`: purged walk-forward·지표·검증 기준
   - `forecasting.py`: 백테스트 / 실시간 예측 저장
   - `news.py`, `sentiment.py`, `events.py`, `briefing.py`
+  - `toss.py`: 토스증권 시세 전용 클라이언트(주문 경로 차단) · KOSPI/KOSDAQ 당일 종가, SPY/QQQ
   - `backfill.py`: KRX 장기 이력, `explain.py`: 검증 통과 모델의 전망 변화 설명, `nlp_eval.py`: 뉴스 라벨 평가
   - `store.py`: SQLite `data/mi.sqlite`
 - `scripts/mi_cli.py` — 파이프라인 진입점 → `data/dashboard/*.json`
@@ -33,7 +34,7 @@
 4. **검증 우선**: 무작위 분할을 쓰지 않는다. 검증 기준과 임계값은 사전에 고정하며, holdout 결과를 보고 바꾸지 않는다. 성능이 나빠도 숨기지 않는다. 검증을 통과하지 못한 확률은 "신뢰할 수 없음"으로 표시한다.
 5. **이력 보존**: 기존 관측값, 예측 이력, 사용자 데이터를 삭제하거나 덮어쓰지 않는다. 예측은 추가만 하고, 백테스트와 실시간 예측을 분리한다. 값이 바뀌면 `observation_revisions`에 기록한다.
 6. **기존 기능 보존**: DEMO 모드와 v0.2 화면, v0.2 수집기의 동작과 인터페이스를 유지한다. 대규모 재작성을 하지 않는다.
-7. **비밀정보**: API 키는 환경변수로만 다룬다(`KRX_API_KEY`, `ANTHROPIC_API_KEY`). 키를 코드, JSON, 로그, 커밋 메시지에 남기지 않는다.
+7. **비밀정보**: API 키는 환경변수로만 다룬다(`KRX_API_KEY`, `ANTHROPIC_API_KEY`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`). 토스 토큰은 주문 권한까지 있으므로 `mi/toss.py`의 시세 경로 허용 목록을 넓히지 않는다. 키를 코드, JSON, 로그, 커밋 메시지에 남기지 않는다.
 8. **승인 필요**: 유료 API나 데이터 계약, 유료 LLM 호출(`briefing --llm`), GitHub push, 외부 배포, abovemin.com 변경, 사용자 데이터 삭제.
 9. **보고**: 실행하지 않은 테스트를 통과했다고 보고하지 않는다. 미완료 항목은 사유와 함께 밝힌다.
 
@@ -54,9 +55,9 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # v0.2 수집기 (12)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (92)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (98)
 node --check real-data.js && node --check intel.js
-node --test scripts/test_intel.mjs                                                # intel.js 단위 테스트 (8, vm으로 실제 파일 로드)
+node --test scripts/test_intel.mjs                                                # intel.js 단위 테스트 (9, vm으로 실제 파일 로드)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \
   .venv/bin/python scripts/ui_smoke.py [--root <fixture>] [--shots <dir>] [--expect "Tab=text"]
 .venv/bin/python .claude/skills/financial-data-audit/scripts/audit_data.py        # 읽기 전용 데이터 감사
