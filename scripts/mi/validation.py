@@ -1,4 +1,4 @@
-"""v0.6 time-series validation. No random splits anywhere.
+"""Time-series validation. No random splits anywhere.
 
 Timeline (positions in the market's own trading-day index):
 

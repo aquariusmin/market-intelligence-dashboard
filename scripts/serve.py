@@ -13,7 +13,7 @@ import http.server
 import re
 from pathlib import Path
 
-ALLOWED = re.compile(r'^/(index\.html|real-data\.js|intel\.js|data/markets\.json|data/dashboard/[a-z_]+\.json)$')
+ALLOWED = re.compile(r'^/(index\.html|app\.js|data/markets\.json|data/reference_only/macro\.json|data/dashboard/[a-z_]+\.json)$')
 HOSTS = {'localhost', '127.0.0.1'}
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; "

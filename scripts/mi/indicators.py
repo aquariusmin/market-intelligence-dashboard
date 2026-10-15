@@ -1,6 +1,6 @@
 """Causal (past-only) indicator series. Value at row t uses closes[0..t] only.
 
-Formulas match scripts/collect_data.py (v0.2) so the last row equals the snapshot indicators.
+Formulas match scripts/collect_data.py so the last row equals the snapshot indicators.
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ def sma(close, n):
 
 
 def ema_sma_seeded(values, n):
-    """EMA seeded with the SMA of the first n values (v0.2 convention). NaNs before seed."""
+    """EMA seeded with the SMA of the first n values (collector convention). NaNs before seed."""
     v = np.asarray(values, dtype=float)
     out = np.full(len(v), np.nan)
     finite = np.flatnonzero(~np.isnan(v))

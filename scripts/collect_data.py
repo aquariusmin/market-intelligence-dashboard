@@ -160,7 +160,7 @@ if __name__ == '__main__':
                         help='두 KRX API를 날짜별 1회씩 진단. JSON 파일을 변경하지 않음')
     parser.add_argument('--markets', nargs='+', choices=list(MARKETS),
                         help='수집할 시장만 선택: sp nq ks kq. 나머지는 기존 데이터 유지')
-    parser.add_argument('--recalculate', action='store_true', help='네트워크 없이 기존 정상 이력의 v0.3 분석 갱신')
+    parser.add_argument('--recalculate', action='store_true', help='네트워크 없이 기존 정상 이력의 지표·국면 분석 갱신')
     args = parser.parse_args()
     if args.check_krx and args.markets and any(k not in ('ks', 'kq') for k in args.markets):
         parser.error('--check-krx에는 --markets ks kq만 지정할 수 있습니다')
@@ -177,7 +177,7 @@ if __name__ == '__main__':
                     market['usage'] = {'scope':'local_reference_only', 'ml_training_allowed':False}
             data['analytics_computed_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
             atomic_json(args.output, data)
-            print('v0.3 분석 갱신 완료 · 원본 관측일/수집시각 유지')
+            print('분석 갱신 완료 · 원본 관측일/수집시각 유지')
             sys.exit(0)
         if args.check_krx:
             failures = 0

@@ -1,4 +1,4 @@
-"""v0.8 Korean daily briefing.
+"""Korean daily briefing.
 
 Rule-based by default: every sentence is generated from stored, sourced values.
 Optional LLM rewrite (anthropic SDK) only with an explicit --llm flag AND ANTHROPIC_API_KEY (paid call).
@@ -74,7 +74,7 @@ def forecast_lines(forecast):
 
 
 def forecast_explanations(forecast):
-    """v0.6: why a validated model's probability changed since the previous session (mi.explain output)."""
+    """Why a validated model's probability changed since the previous session (mi.explain output)."""
     out = []
     for key in NAMES:
         for h, f in sorted(((forecast or {}).get('markets', {}).get(key) or {}).items(), key=lambda kv: int(kv[0])):
@@ -88,7 +88,7 @@ def forecast_explanations(forecast):
 def outlook_changes(regimes, prev_forecasts, restricted=()):
     out = []
     for key, r in regimes.items():
-        if r and r.get('status') == 'ok' and r.get('daily'):   # v0.4: thresholds fixed in mi.daily
+        if r and r.get('status') == 'ok' and r.get('daily'):   # thresholds fixed in mi.daily
             out += ['%s %s' % (NAMES[key], c['plain' if key in restricted else 'text']) for c in r['daily']['changes']]
             continue
         if not r or r.get('status') != 'ok' or len(r.get('history', [])) < 2:

@@ -1,4 +1,4 @@
-"""v0.7 news intelligence. Stores metadata only (title, source, URL, times) — never article bodies.
+"""News intelligence. Stores metadata only (title, source, URL, times) — never article bodies.
 
 News analysis is an interpretation layer: it is NOT a feature of the forecasting models
 (no point-in-time news archive exists to validate it).
@@ -241,7 +241,7 @@ def recent(conn, days=14, limit=200, now=None):
     for r in rows:
         d = dict(r)
         d['related_markets'] = json.loads(d['related_markets'])
-        # Rows stored before v1.0.1 may already include an ingest-time age penalty; they are not rewritten.
+        # Rows stored before read-time aging may already include an ingest-time age penalty; they are not rewritten.
         d['base_importance'] = d['importance']
         d['importance'] = effective_importance(d['importance'], d['published_at'], now)
         out.append(d)

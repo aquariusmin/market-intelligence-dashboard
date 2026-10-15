@@ -1,4 +1,4 @@
-"""v0.4 Daily market intelligence: day-over-day changes, regime explanation, daily snapshots.
+"""Daily market intelligence: day-over-day changes, regime explanation, daily snapshots.
 
 Change thresholds were fixed on 2026-10-15 before looking at any day-over-day output, and are not tuned to
 data. Changing one means bumping METHOD so older snapshots stay comparable among themselves.

@@ -1,4 +1,4 @@
-"""v0.6 news classification / sentiment evaluation against the user's own labels.
+"""News classification / sentiment evaluation against the user's own labels.
 
 `export` writes data/eval/news_labels.csv with the pipeline's predictions next to empty label columns.
 The user fills `label_category` / `label_sentiment`; existing labels are always kept on re-export.

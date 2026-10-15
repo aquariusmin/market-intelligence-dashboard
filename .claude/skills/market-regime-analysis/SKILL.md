@@ -33,7 +33,7 @@ description: Develop or check the market-regime and risk layer — rule-based Bu
    - 문장 안의 숫자는 metrics 값과 같아야 한다.
 6. **검증.**
    - `cd scripts && ../.venv/bin/python -m unittest test_mi_analysis` 를 실행한다.
-   - 실데이터로 `mi_cli.py regime`을 실행해 마지막 행 지표를 v0.2 스냅샷과 대조한다(`IndicatorParityTest`).
+   - 실데이터로 `mi_cli.py regime`을 실행해 마지막 행 지표를 가격 스냅샷(`markets.json`)의 수집기 지표와 대조한다(`IndicatorParityTest`).
    - 전환 빈도도 점검한다. 확인 규칙을 적용한 뒤에도 1–2일짜리 전환이 많으면 규칙을 검토한다.
 
 ## 출력 형식
@@ -51,4 +51,4 @@ description: Develop or check the market-regime and risk layer — rule-based Bu
 ## 실패 시 처리
 - **이력 부족(200일선이나 60일 모멘텀 계산 불가):** `insufficient_history`를 그대로 표시한다. 짧은 창으로 대체하지 않는다.
 - **거시 입력 결측:** 해당 위험 구성요소를 None으로 두고 점수는 나머지로만 계산한다. 결측 사실은 표시한다.
-- **v0.2 지표와 불일치:** 공식 차이를 먼저 해결한다. 해결 전에는 변경을 반영하지 않는다.
+- **수집기 지표와 불일치:** 공식 차이를 먼저 해결한다. 해결 전에는 변경을 반영하지 않는다.

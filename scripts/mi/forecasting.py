@@ -9,7 +9,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import numpy as np
 
-from . import VERSION, dataset, explain, licenses, models, prices, store, timing, validation
+from . import VERSION, dataset, economics, explain, licenses, models, prices, store, timing, validation
 from .macro import SERIES as MACRO
 
 LABELS = dataset.CLASSES
@@ -97,6 +97,8 @@ def train(conn, markets=None, horizons=dataset.HORIZONS, cfg_overrides=None, man
                 entry['previous_run'] = _previous_verdict(conn, m, h)
                 if 'lightgbm' in res['chosen']:
                     entry['lightgbm_importance'] = _importance(ds, res, cfg)
+                pidx, pproba, _, _ = res['predictions'][res['primary_model']]
+                entry['economics'] = economics.report(ds['close'].to_numpy(), pidx, pproba, h, m)
                 _store_backtest(conn, run_id, m, h, ds, res, entry)
             perf['markets'][m][str(h)] = entry
         conn.commit()  # release the write lock between markets; each market's rows are self-contained

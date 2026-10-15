@@ -1,6 +1,6 @@
-// Unit tests for intel.js pure helpers and loader (Node built-in test runner, no dependencies).
+// Unit tests for app.js helpers and loaders (Node built-in test runner, no dependencies).
 // Run: node --test scripts/test_intel.mjs
-// The page scripts are evaluated as-is in one vm context (index.html inline script -> real-data.js -> intel.js)
+// The page scripts are evaluated as-is in one vm context (index.html inline script -> app.js)
 // with a do-nothing DOM, so the tests exercise the shipped files without a build step or exports.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,8 +21,8 @@ function load() {
   vm.createContext(ctx);
   vm.runInContext(read('index.html').match(/<script>([\s\S]*?)<\/script>/)[1], ctx, {filename: 'index.html'});
   vm.runInContext('render = () => {}', ctx);   // page rendering needs a real DOM (covered by ui_smoke.py)
-  for (const f of ['real-data.js', 'intel.js']) vm.runInContext(read(f), ctx, {filename: f});
-  const api = vm.runInContext(`({esc, safeUrl, link, INTEL_SHAPE, flags, dailyChanges, explainBlock, nlpEval, applyLatest, loadIntel,
+  vm.runInContext(read('app.js'), ctx, {filename: 'app.js'});
+  const api = vm.runInContext(`({esc, safeUrl, link, INTEL_SHAPE, flags, dailyChanges, explainBlock, nlpEval, applyLatest, econCard, loadIntel,
     getIntel: () => intel, getErrors: () => intelErrors, setIntel: v => { intel = v; },
     getReal: () => realData, setReal: v => { realData = v; }})`, ctx);
   return {ctx, api};
@@ -80,7 +80,7 @@ test('STALE badge appears only after the per-file threshold', () => {
 
 test('daily changes are escaped and tolerate older files', () => {
   const {api} = load();
-  assert.equal(api.dailyChanges({}), '');                                // regime.json before v0.4
+  assert.equal(api.dailyChanges({}), '');                                // regime.json without a daily block
   const html = api.dailyChanges({daily: {previous_as_of: '2026-10-13', changes: [{text: '<script>x</script>'}],
     explanation: ['추세 점수 +5/5']}});
   assert.match(html, /전일\(2026-10-13\) 대비/);
@@ -120,4 +120,16 @@ test('latest.json overlays a newer provisional close only when valid and newer',
   assert.equal(m.ks.provisional.dates[0], '2026-10-15');
   assert.equal(m.kq.value, 6008.81);        // value != last close -> rejected
   assert.equal(m.sp.as_of, '2026-10-14');   // not newer -> unchanged
+});
+
+test('cost-aware card shows the verdict and tolerates missing parts', () => {
+  const {api} = load();
+  assert.equal(api.econCard({}), '');
+  const ok = {status: 'ok', periods: 300, trades: 120, hit_rate: 0.55, strategy_total: 0.2, buy_hold_total: 0.5,
+    strategy_max_drawdown: -0.1, buy_hold_max_drawdown: -0.3, mean_excess_vs_hold: -0.0004, excess_ci90: [-0.001, 0.0002],
+    round_trip_cost: 0.001, verdict: '우위 없음'};
+  const html = api.econCard({economics: {same_close: ok, next_close: {status: 'insufficient', reason: '<b>x</b>'}}});
+  assert.match(html, /우위 없음/);
+  assert.match(html, /300 \/ 120/);
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
 });

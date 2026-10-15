@@ -1,4 +1,4 @@
-"""v0.4 / v0.7 / v0.8 / v0.9 checks (offline). Synthetic inputs exist only inside these tests."""
+"""Regime, news, briefing, storage and provider checks (offline). Synthetic inputs exist only inside these tests."""
 import json
 import tempfile
 import unittest
@@ -482,7 +482,7 @@ class EventsBriefingTest(unittest.TestCase):
 
 
 class DailyTest(unittest.TestCase):
-    """v0.4 day-over-day changes: thresholds fixed in mi.daily (2026-10-15)."""
+    """Day-over-day changes: thresholds fixed in mi.daily (2026-10-15)."""
 
     def state(self, regime_='Bullish / Low Volatility', raw=None, trend=4, score=30.0, level=('Moderate', '보통'),
               comps=None, vol=0.5):
@@ -708,7 +708,7 @@ class BackfillTest(unittest.TestCase):
 
 
 class ExplainTest(unittest.TestCase):
-    """v0.6 outcome-change explanation: one-at-a-time revert on the same fitted model."""
+    """Outcome-change explanation: one-at-a-time revert on the same fitted model."""
 
     @staticmethod
     def softmax_model(weights):

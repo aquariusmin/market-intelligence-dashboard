@@ -1,6 +1,6 @@
 ---
 name: dashboard-qa
-description: QA the local dashboard after UI or JSON-contract changes — REAL vs DEMO separation, every panel shows source/as-of/status, unavailable and not-validated states, console errors, mobile (390px) layout, chart range/market/horizon controls, XSS-safe rendering of external text. Use when editing index.html, real-data.js, intel.js, or the shape of data/dashboard/*.json written by mi_cli.py.
+description: QA the local dashboard after UI or JSON-contract changes — REAL vs DEMO separation, every panel shows source/as-of/status, unavailable and not-validated states, console errors, mobile (390px) layout, chart range/market/horizon controls, XSS-safe rendering of external text. Use when editing index.html, app.js, or the shape of data/dashboard/*.json written by mi_cli.py.
 ---
 
 # Dashboard QA
@@ -12,8 +12,8 @@ description: QA the local dashboard after UI or JSON-contract changes — REAL v
 - 대상이 아님: 엔진 로직만 바꾸고 JSON 형태는 그대로인 경우. 이때는 단위 테스트로 충분하다.
 
 ## 절차
-1. **정적 검사.** `node --check real-data.js && node --check intel.js`
-2. **계약 확인.** JSON 키를 바꿨다면 해당 키를 쓰는 모든 곳을 grep으로 찾는다(`intel.js`, `briefing.py`, `mi_cli.py`). 파일이 없거나 키가 빠졌을 때 화면이 "파일 없음 / 이용 불가"를 보여주고 예외가 나지 않는지 확인한다.
+1. **정적 검사와 JS 테스트.** `node --check app.js && node scripts/test_ui.js && node --test scripts/test_intel.mjs`
+2. **계약 확인.** JSON 키를 바꿨다면 해당 키를 쓰는 모든 곳을 grep으로 찾는다(`app.js`, `briefing.py`, `mi_cli.py`). 파일이 없거나 키가 빠졌을 때 화면이 "파일 없음 / 이용 불가"를 보여주고 예외가 나지 않는지 확인한다.
 3. **실데이터 스모크.**
    ```sh
    MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \

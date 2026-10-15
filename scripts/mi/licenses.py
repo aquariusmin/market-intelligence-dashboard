@@ -19,7 +19,7 @@ SOURCES = {
                        collection='conditional', local_storage='not_allowed', ml_training='not_allowed',
                        redistribution='not_allowed',
                        notes='FRED: AI/ML 개발·훈련 금지, 저장·캐시·보관 금지 조항. S&P: 사전 서면 허가 없는 복제 금지. '
-                             'v0.2의 markets.json 스냅샷은 기존 동작으로 유지되나 약관과 충돌 가능성 있음 (README 참고).'),
+                             '가격 스냅샷(markets.json)은 기존 동작으로 유지되나 약관과 충돌 가능성 있음 (README 참고).'),
     'fred_nasdaq100': dict(provider='Nasdaq, Inc. via FRED', dataset='NASDAQ100 (daily close)', terms_url=FRED_TERMS,
                            collection='conditional', local_storage='not_allowed', ml_training='not_allowed',
                            redistribution='not_allowed', notes='FRED 약관 + "Copyrighted: Pre-Approval Required".'),

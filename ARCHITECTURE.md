@@ -1,6 +1,6 @@
 # Architecture
 
-- **기준:** 2026-10-15, `feature/v1.0-local` 작업 트리
+- **기준:** 2026-10-16, `main` (하나의 제품, 단계별 버전 구분 없음)
 - **문서 역할:**
   - 이 문서는 개발자가 참고할 **현재 구조와 그 구조를 지키는 규칙**을 정리합니다.
   - 설치·실행·데이터 약관 표는 `README.md`에 있습니다.
@@ -10,8 +10,10 @@
 
 ```text
                  ┌──────────────── 수집 (네트워크) ───────────────────────────────┐
-FRED SP500/NDX ──┤ scripts/collect_data.py + providers.py  (v0.2, stdlib + curl)   │
-KRX OPEN API ────┤        └─> data/markets.json  (v0.2 스냅샷)                      │
+FRED SP500/NDX ──┤ scripts/collect_data.py + providers.py  (stdlib + curl)         │
+KRX OPEN API ────┤        └─> data/markets.json  (가격 스냅샷 · 지표)              │
+Toss Open API ───┤ mi/toss.py ─> 당일 종가(잠정) · SPY/QQQ   (시세 전용)          │
+FRED·ECOS (선택) ┤ collect_macro.py ─> data/reference_only/macro.json (표시 전용)│
 Fed DDP H.15/H.10┤ mi/macro.py ──────────────┐                                     │
 Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                                     │
                  └───────────────────────────┼─────────────────────────────────────┘
@@ -23,13 +25,13 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
                                              │
      ┌──────────── 분석 (오프라인, 결정적) ──┼─────────────────────────────────────┐
      │ timing ─ indicators ─ regime          │  licenses (ml_allowed 게이트)        │
-     │ dataset ─ models ─ validation ─ forecasting                                  │
+     │ dataset ─ models ─ validation ─ forecasting ─ economics ─ explain             │
      │ sentiment ─ briefing (규칙 기반 / 옵트인 LLM + validate_llm)                │
      └──────────────────────────────────────┼─────────────────────────────────────┘
                                              ▼
              scripts/mi_cli.py  ──>  data/dashboard/*.json  (원자적 교체)
                                              ▼
-   index.html (v0.2 UI + DEMO) ← real-data.js (markets.json) ← intel.js (dashboard/*.json)
+   index.html (레이아웃 · CSS · DEMO) + app.js (REAL DATA: markets.json + latest.json + dashboard/*.json)
 ```
 
 **설계 성격:**
@@ -42,9 +44,9 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 ### 2.1 수집 계층
 | 모듈 | 입력 | 출력 | 비고 |
 |---|---|---|---|
-| `collect_data.py`, `providers.py` | FRED CSV, KRX `idx/{kospi,kosdaq}_dd_trd` | `markets.json` | v0.2 인터페이스를 **변경 금지**. curl을 하위 프로세스로 쓰고, 키는 stdin으로만 넘기고, 재시도는 3회. `--output`으로 경로를 바꿀 수 있음 |
+| `collect_data.py`, `providers.py` | FRED CSV, KRX `idx/{kospi,kosdaq}_dd_trd` | `markets.json` | CLI·출력 형식 유지 (`--output`, `--markets`, `--check-krx`, `--recalculate`). curl을 하위 프로세스로 쓰고, 키는 stdin으로만 넘기고, 재시도는 3회. `--output`으로 경로를 바꿀 수 있음 |
 | `mi/toss.py` | 토스증권 Open API (시세 전용) | `prices` (`toss_openapi`: KOSPI/KOSDAQ 잠정치, `toss_etf`: SPY/QQQ) | 시세 경로만 허용 목록 호출, 계좌 헤더 미전송, 키·토큰 stdin. 진행 중 세션 봉 제외, KRX와 대조(`crosscheck`) |
-| `mi/backfill.py` | KRX OPEN API(기준일별) | `prices`, `krx_calendar` | v0.5 장기 이력. 이어 받기, 하루 예산, 오류 시 중단(진행분 보존). 어제(KST)까지만 요청 |
+| `mi/backfill.py` | KRX OPEN API(기준일별) | `prices`, `krx_calendar` | 장기 이력. 이어 받기, 하루 예산, 오류 시 중단(진행분 보존). 어제(KST)까지만 요청 |
 | `mi/prices.py` | `markets.json` | `prices` 테이블 | `storage_allowed()`를 통과한 소스만 보관(현재 KRX만). FRED는 읽기만 |
 | `mi/macro.py` | Fed DDP CSV(H.15 3개, H.10 2개). 옵트인 시 FRED VIX·ICE | `macro` 테이블 / `fred_risk.json`(TTL 3일) | 5년 단위로 나눠 받고, 범위를 검사하고, 개정 이력을 기록 |
 | `mi/news.py` | Fed·SEC RSS, GDELT DOC | `news` 테이블 | 메타데이터만 저장. 중복은 삭제하지 않고 `duplicate_of`로 연결. 429를 받으면 나머지 쿼리를 중단 |
@@ -54,10 +56,10 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | 모듈 | 책임 | 지켜야 할 규칙 |
 |---|---|---|
 | `mi/timing.py` | `available_at`, `decision_time`, `asof_join`, Fed 휴일, 소스별 가격 공개 규칙 | 모든 외부 값은 이 모듈을 거쳐 결합합니다. 동률은 최신 관측일을 고릅니다(mergesort) |
-| `mi/indicators.py` | SMA·RSI(Wilder)·MACD·실현변동성·낙폭·과거 구간 백분위 | v0.2 JS 공식과 수치가 같아야 합니다(테스트). 인과적 계산만 하고, `min_periods`를 반드시 지정 |
+| `mi/indicators.py` | SMA·RSI(Wilder)·MACD·실현변동성·낙폭·과거 구간 백분위 | 가격 수집기 공식과 수치가 같아야 합니다(테스트). 인과적 계산만 하고, `min_periods`를 반드시 지정 |
 | `mi/regime.py` | 추세 규칙 5개 → 점수 −5..+5, 변동성 백분위 ≥ 0.70, 3일 확인 → 5개 국면. 0–100 위험 점수, 요인 문장 | 규칙은 사전에 고정합니다(데이터에 맞춰 조정하지 않음). 이력은 그 시점까지의 데이터로만 계산한 기록입니다. 위험 점수는 사용한 구성요소 수를 함께 보고 |
-| `mi/daily.py` | v0.4 전일 대비 변화(`diff`), 거시 변화, 국면 해설, 스냅샷 행 | 기준값은 사전 고정(`daily-v1`). 화면용 `text`와 수치 없는 `plain`을 함께 생성. 위험 점수는 구성요소 집합이 같을 때만 비교 |
-| `mi/explain.py` | v0.6 전망 변화 설명: 같은 모델로 직전 입력과 오늘 입력을 비교, 입력 하나씩 되돌려 분해 | 검증 통과 모델에만 생성. 인과 아님을 명시. 상호작용 몫 별도 |
+| `mi/daily.py` | 전일 대비 변화(`diff`), 거시 변화, 국면 해설, 스냅샷 행 | 기준값은 사전 고정(`daily-v1`). 화면용 `text`와 수치 없는 `plain`을 함께 생성. 위험 점수는 구성요소 집합이 같을 때만 비교 |
+| `mi/explain.py` | 전망 변화 설명: 같은 모델로 직전 입력과 오늘 입력을 비교, 입력 하나씩 되돌려 분해 | 검증 통과 모델에만 생성. 인과 아님을 명시. 상호작용 몫 별도 |
 | `mi/nlp_eval.py` | 사용자 라벨 대비 뉴스 분류·감성 정확도 | 재내보내기 시 라벨 보존. 판정 기준 사전 고정(라벨 100개 이상, macro-F1 0.5 이상) |
 | `mi/licenses.py` | `SOURCES` 레지스트리, `ml_allowed`, `storage_allowed`, 사용자 manifest | 확인되지 않은 권한은 불허. 조건부 저장은 `conditions`를 적어야 통과 |
 | `mi/dataset.py` | 자기 시장 피처 13개, 거시·교차시장 피처, 3분류 라벨(neutral 대역 k=0.43·σ60) | 라이선스를 통과하지 못한 입력의 피처는 제외(`dropped_features`). 한국 예측은 미국 t−1 값만 사용 |
@@ -102,10 +104,9 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 ### 2.5 화면 계층
 | 파일 | 역할 | 규칙 |
 |---|---|---|
-| `index.html` | v0.2 UI와 DEMO 데이터(고정 샘플) | DEMO와 REAL은 화면에서 명확히 구분 |
-| `real-data.js` | `data/markets.json` 로드, 스키마 검증 → v0.2 REAL 화면 | v0.2 동작 유지 |
-| `scripts/serve.py` | 로컬 서버 (`make dev`, `ui_smoke.py`) | 127.0.0.1 전용. 허용 파일 5종만 제공. Host 검사(421), CSP·nosniff·no-referrer |
-| `intel.js` | `data/dashboard/*.json` 로드 → 6개 탭 패널 | 모든 문자열은 `esc()`, URL은 `safeUrl()`. `INTEL_SHAPE`로 형식 검사, 패널별 `guard()`, STALE 배지와 재로드 실패 배지. 미검증 확률은 "신뢰할 수 없음" |
+| `index.html` | 레이아웃, CSS, DEMO 화면(고정 샘플), `render()` | DEMO와 REAL은 화면에서 명확히 구분 |
+| `scripts/serve.py` | 로컬 서버 (`make dev`, `ui_smoke.py`) | 127.0.0.1 전용. 허용 목록(`index.html`, `app.js`, `markets.json`, 참고 지표, `dashboard/*.json`)만 제공. Host 검사(421), CSP·nosniff·no-referrer |
+| `app.js` | 한 번의 로딩(가격 스냅샷 + 참고 지표 + 분석 JSON) → 최신 종가 오버레이 → 6개 탭 렌더링. 차트(기간·SMA 토글·국면 띠), 비용 반영 성과, 전망 변화 설명 | 모든 문자열은 `esc()`, URL은 `safeUrl()`. `INTEL_SHAPE`로 형식 검사, 패널별 `guard()`, STALE 배지와 재로드 실패 배지. 미검증 확률은 "신뢰할 수 없음" |
 
 **JSON 계약** (`data/dashboard/`, 모두 `generated_at` 포함):
 
@@ -120,7 +121,7 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | `ingest.json` / `status.json` | 수집 결과 / 전체 상태·작업 로그·라이선스 | `cmd_ingest` / `cmd_status` |
 
 **스키마 변경 규칙:**
-- 키는 **추가만** 합니다. 이름 변경이나 삭제가 필요하면 `intel.js`가 이전 형태와 새 형태를 모두 읽을 수 있게 먼저 바꾼 뒤에 합니다.
+- 키는 **추가만** 합니다. 이름 변경이나 삭제가 필요하면 `app.js`가 이전 형태와 새 형태를 모두 읽을 수 있게 먼저 바꾼 뒤에 합니다.
 - 변경 후에는 `dashboard-qa` Skill과 `ui_smoke.py`를 실행합니다.
 
 ## 3. 시간 모델
@@ -128,7 +129,7 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | 대상 | `available_at` (UTC로 저장) |
 |---|---|
 | 미국 지수 종가 (FRED) | 16:00 ET + 15분 |
-| KRX 지수 종가 | 다음 평일 08:00 KST (보수적. 한국 휴장일 미반영 → ROADMAP 0.5-B) |
+| KRX 지수 종가 | 다음 평일 08:00 KST (보수적. 관측 휴장일은 `krx_calendar`에 기록) |
 | 라이선스 데이터 | 종가 + manifest `publication_delay_minutes`. 값이 없으면 다음 영업일 09:00(현지) |
 | H.15 금리 | 다음 연준 영업일 17:00 ET |
 | H.10 환율 | 해당 주 다음의 화요일(휴일 반영) 16:15 ET |
@@ -168,25 +169,25 @@ dataset.build ─> 개발 구간 ─┬─ fold: fit → purge(h)+embargo → ca
 
 | 범위 | 파일 | 수 | 실행 |
 |---|---|---|---|
-| v0.2 수집기 | `scripts/test_data.py` | 12 | `python3 test_data.py` (stdlib) |
+| 가격·참고 지표 수집기 | `scripts/test_data.py` | 17 | `python3 test_data.py` (stdlib) |
 | 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 84 | `.venv` unittest |
 | CLI·로컬 서버 | `test_mi_cli.py` | 14 | 같음 |
-| 화면 로직 | `scripts/test_intel.mjs` | 9 | `node --test` (vm으로 index.html 인라인 → real-data.js → intel.js 로드) |
+| 화면 로직 | `scripts/test_intel.mjs`, `scripts/test_ui.js` | 10 + 8그룹 | `node` (vm으로 index.html 인라인 → app.js 로드) |
 | 브라우저 | `scripts/ui_smoke.py` | 24 뷰 | headless Chromium |
 | 데이터 감사 | `.claude/skills/financial-data-audit/scripts/audit_data.py` | — | 읽기 전용 |
 
 - 네트워크를 쓰는 단위 테스트는 없습니다(공급자는 모두 mock).
 - 합성 데이터는 테스트 안에서만 씁니다.
-- Python 커버리지는 89%입니다(2026-10-15, v0.4 반영 후). JS는 순수 함수와 로더를 단위 테스트하고, 렌더링은 브라우저 스모크로 검사합니다.
+- Python 커버리지는 89%입니다(2026-10-15 측정). JS는 순수 함수와 로더를 단위 테스트하고, 렌더링은 브라우저 스모크로 검사합니다.
 
 ## 7. 확장 지점 (ROADMAP과 대응)
 
 | 하고 싶은 일 | 손댈 곳 | 손대지 말 것 |
 |---|---|---|
 | 새 데이터 소스 | `licenses.SOURCES`(조항·확인일) → 수집 모듈 → `timing`의 공개 규칙 → 감사 | 게이트 우회, 추정값 채우기 |
-| 일별 스냅샷 (v0.4) | `store`의 스키마 v3, 새 `mi/daily.py`, `regime.json`에 `daily` 블록 추가 | 새 JSON 파일이나 새 서버 |
-| 실데이터 예측 (v0.5) | 데이터 소스 등록, KRX 백필 옵션, 휴장일 | `models`·`validation` 재작성, `GATE_FIELDS` 변경 |
-| 전망 변화 설명 (v0.6) | 새 `mi/explain.py` → 브리핑 FACTS | 미검증 모델의 설명 생성, 뉴스를 피처로 사용 |
+| 새 예측 대상 | `prices.target_series`(학습 대상) + 라이선스 등록 | 기존 모델의 입력 변경(holdout 재사용), `GATE_FIELDS` 변경 |
+| 새 화면 패널 | `app.js`에 함수 추가 + `guard()` 등록 + `test_intel.mjs` | 새 빌드 도구, 원본 계산을 브라우저로 옮기기 |
+| 성과 규칙 | `mi/economics.py` 상수 (결과 보기 전 고정·날짜 기록) | 결과를 본 뒤 비용·규칙 조정 |
 
 ## 8. 보안 경계
 
@@ -204,9 +205,9 @@ dataset.build ─> 개발 구간 ─┬─ fold: fit → purge(h)+embargo → ca
 
 | # | 결정 | 이유 | 재검토 조건 |
 |---|---|---|---|
-| A1 | 정적 JSON + 빌드 없는 Vanilla JS | 1인 로컬 사용, v0.2 화면 보존 | 다중 사용자 또는 외부 배포가 필요할 때 |
+| A1 | 정적 JSON + 빌드 없는 단일 `app.js` | 1인 로컬 사용, 단순함 | 다중 사용자 또는 외부 배포가 필요할 때 |
 | A2 | SQLite 단일 파일, 추가 전용 | 이력 보존, 백업이 쉬움 | 동시 쓰기가 많아질 때 |
-| A3 | v0.2 수집기를 하위 프로세스로 호출 | v0.2 인터페이스 보존 | v0.2 화면을 은퇴시킬 때 |
+| A3 | 가격 수집기를 하위 프로세스로 호출 | stdlib 수집기를 독립 실행 가능하게 유지 | 수집기를 엔진에 흡수할 때 |
 | A4 | 라이선스를 코드 레지스트리로 관리 | 테스트할 수 있는 게이트 | 소스가 20개를 넘을 때 |
 | A5 | 국면은 규칙 기반, 예측과 분리 | FRED 가격은 ML 적합 금지, 해석 가능성 | 라이선스 데이터를 확보했을 때(HMM 검토) |
 | A6 | LLM은 문장 재작성만 하고 수치는 검증 | 숫자를 지어내지 않게 하기 위해 | — |

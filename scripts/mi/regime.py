@@ -1,4 +1,4 @@
-"""v0.4 rule-based market regime & risk. Arithmetic rules fixed a priori (not fitted to data).
+"""Rule-based market regime & risk. Arithmetic rules fixed a priori (not fitted to data).
 
 Each historical label uses only data available at that day's decision time, so the regime
 history is a point-in-time (filtered) record, never a smoothed / hindsight one.

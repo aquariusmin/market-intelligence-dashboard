@@ -1,4 +1,4 @@
-"""v0.6 outlook-change explanation (deterministic, no LLM).
+"""Outlook-change explanation (deterministic, no LLM).
 
 Why did today's probability differ from the previous session's? The same fitted model scores the previous
 session's inputs and today's inputs; the difference is split by reverting one input at a time to its

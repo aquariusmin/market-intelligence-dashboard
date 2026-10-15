@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Market Intelligence pipeline CLI (v1.0). Run with the project venv: .venv/bin/python scripts/mi_cli.py <cmd>
+"""Market Intelligence pipeline CLI. Run with the project venv: .venv/bin/python scripts/mi_cli.py <cmd>
 
-  ingest     v0.2 price collector + archive storage-permitted rows + Fed macro series
-  regime     v0.4 regime & risk analysis            -> data/dashboard/regime.json, macro.json
-  train      v0.5/0.6 licence gate + walk-forward   -> data/dashboard/performance.json
+  ingest     price collector + archive storage-permitted rows + Fed macro + Toss
+  regime     regime, risk, day-over-day changes      -> data/dashboard/regime.json, macro.json
+  train      licence gate + walk-forward validation -> data/dashboard/performance.json
   forecast   resolve pending outcomes + live forecast -> data/dashboard/forecast.json
-  news       v0.7 news metadata + classification    -> data/dashboard/news.json
-  briefing   v0.8 Korean daily briefing             -> data/dashboard/briefing.json
+  news       news metadata + classification         -> data/dashboard/news.json
+  briefing   Korean daily briefing                  -> data/dashboard/briefing.json
   status     system status (+ SQLite integrity)     -> data/dashboard/status.json
   backup     online copy of data/mi.sqlite         -> data/backups/ (never deletes old copies)
   backfill   KRX KOSPI/KOSDAQ history -> archive   (resumable, rate-limited; needs KRX_API_KEY)
@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer from v0.2)
+from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer shared with the price collector)
 from mi import VERSION, backfill, briefing, daily, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
@@ -287,6 +287,7 @@ def cmd_status(args):
             'jobs': jobs, 'last_jobs': {n: last(n) for n in ('ingest', 'regime', 'train', 'forecast', 'news', 'briefing')},
             'licenses': licenses.registry(),
             'storage': store.storage_report(conn),
+            'reference_macro': reference_macro_state(),
         }
     write('status.json', status)
 
@@ -325,6 +326,18 @@ def cmd_label_score(args):
         r = rep[k]
         print('%s: n=%d accuracy=%s macro-F1=%s -> %s (%s)' % (k, r['n'], r['accuracy'], r['macro_f1'], r['verdict'],
                                                            r['verdict_reason']))
+
+
+def reference_macro_state():
+    """Optional display-only macro file written by scripts/collect_macro.py (never a model input)."""
+    p = paths.DATA / 'reference_only' / 'macro.json'
+    if not p.exists():
+        return {'exists': False}
+    try:
+        d = json.loads(p.read_text(encoding='utf-8'))
+        return {'exists': True, 'last_success_at': d.get('last_success_at'), 'last_attempt_at': d.get('last_attempt_at')}
+    except (OSError, ValueError) as exc:
+        return {'exists': True, 'error': '%s: %s' % (type(exc).__name__, exc)}
 
 
 def cmd_backup(args):

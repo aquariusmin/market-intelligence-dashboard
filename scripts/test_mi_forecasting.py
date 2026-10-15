@@ -1,4 +1,4 @@
-"""v0.5/v0.6 checks. Synthetic series exist only inside these tests and are never written to data/."""
+"""Dataset, model and validation checks. Synthetic series exist only inside these tests and are never written to data/."""
 import json
 import math
 import tempfile
@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from mi import dataset, forecasting, licenses, models, store, timing, validation
+from mi import economics, dataset, forecasting, licenses, models, store, timing, validation
 
 
 def bdays(n, start=date(2010, 1, 4)):
@@ -51,6 +51,50 @@ class AsofResolutionTest(unittest.TestCase):
         self.assertEqual(len(timing.asof_join(empty, [date(2026, 10, 1)], avail, np.array([4.1]), 'x')), 0)
         dec = pd.DatetimeIndex(['2026-10-02T21:00:00Z']).astype('datetime64[s, UTC]')
         self.assertEqual(list(timing.asof_join(dec, [date(2026, 10, 1)], avail, np.array([4.1]), 'x')), [4.1])
+
+
+class EconomicsTest(unittest.TestCase):
+    """Cost-aware holdout evaluation (rule and costs fixed 2026-10-16)."""
+
+    def setUp(self):
+        rng = np.random.default_rng(4)
+        self.close = 100 * np.exp(np.cumsum(rng.normal(0.0003, 0.01, 1200)))
+        self.idx = np.arange(400, 1150)
+
+    def proba_from(self, bull):
+        return np.array([[0.2, 0.2, 0.6] if b else [0.6, 0.2, 0.2] for b in bull])
+
+    def test_periods_do_not_overlap_and_fit_the_series(self):
+        got = economics.periods(self.idx, 5, len(self.close), delay=1)
+        self.assertTrue(all(b - a == 5 for a, b in zip(got, got[1:])))
+        self.assertTrue(all(i + 1 + 5 < len(self.close) for i in got))
+
+    def test_oracle_signal_beats_holding_after_costs(self):
+        h = 5
+        fwd = np.array([self.close[i + h] / self.close[i] - 1 for i in self.idx])
+        r = economics.evaluate(self.close, self.idx, self.proba_from(fwd > 0.003), h, 'kq')
+        self.assertEqual(r['verdict'], '비용 차감 후 우위')
+        self.assertGreater(r['excess_ci90'][0], 0)
+
+    def test_always_long_only_loses_the_costs(self):
+        r = economics.evaluate(self.close, self.idx, self.proba_from([True] * len(self.idx)), 5, 'sp')
+        self.assertEqual(r['exposure'], 1.0)
+        self.assertAlmostEqual(r['mean_excess_vs_hold'], -economics.ROUND_TRIP_COST['sp'])
+        self.assertEqual(r['verdict'] == '비용 차감 후 우위', False)
+        flat = economics.evaluate(self.close, self.idx, self.proba_from([False] * len(self.idx)), 5, 'sp')
+        self.assertEqual((flat['trades'], flat['strategy_total']), (0, 0.0))
+
+    def test_verdict_wording(self):
+        self.assertEqual(economics.verdict({'excess_ci90': [0.001, 0.01], 'mean_excess_vs_hold': 0.005}), '비용 차감 후 우위')
+        self.assertTrue(economics.verdict({'excess_ci90': [-0.002, 0.005], 'mean_excess_vs_hold': 0.002}).startswith('우위 근거 부족'))
+        self.assertTrue(economics.verdict({'excess_ci90': [-0.01, -0.001], 'mean_excess_vs_hold': -0.004,
+                                           'strategy_total': 0.3}).startswith('수익은 양'))
+        self.assertEqual(economics.verdict({'excess_ci90': [-0.01, -0.001], 'mean_excess_vs_hold': -0.004,
+                                            'strategy_total': -0.1}), '우위 없음')
+
+    def test_too_few_periods(self):
+        r = economics.evaluate(self.close, np.arange(1100, 1150), self.proba_from([True] * 50), 20, 'ks')
+        self.assertEqual(r['status'], 'insufficient')
 
 
 class GateTest(unittest.TestCase):

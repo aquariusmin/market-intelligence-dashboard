@@ -1,4 +1,4 @@
-"""v0.5 point-in-time dataset: features X_t (known at the decision time of day t) and labels y_t.
+"""Point-in-time dataset: features X_t (known at the decision time of day t) and labels y_t.
 
 Leakage controls
 - Own-market features use closes <= t (causal rolling windows).

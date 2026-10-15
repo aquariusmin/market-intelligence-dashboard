@@ -1,4 +1,4 @@
-"""v0.5 KRX daily index history backfill into the SQLite archive (ROADMAP 0.5-B).
+"""KRX daily index history backfill into the SQLite archive.
 
 - Resumable: dates already archived, and past dates KRX answered with no data (holidays), are skipped.
   Every answer is recorded in `krx_calendar`, so the observed trading calendar accumulates as a by-product.
@@ -6,7 +6,7 @@
   (terms Art. 8(4): 10,000 requests per key per day), counted across runs in `provider_calls`.
 - Stops at the first provider error (auth, network, format); everything fetched so far is kept.
 - Only weekdays up to yesterday (KST) are requested: KRX publishes a session's data the next morning.
-The v0.2 collector and markets.json are not touched; prices.series() merges the archive with the snapshot.
+The price collector and markets.json are not touched; prices.series() merges the archive with the snapshot.
 """
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -73,7 +73,7 @@ def pending_dates(conn, market, start, end, today):
 def run(conn, start, markets=('ks', 'kq'), end=None, fetch=None, sleep=time.sleep, max_calls=None, now=None, log=print):
     """Returns a report dict. `fetch(config, day)` -> {'date','close'} | None (defaults to providers.krx_day)."""
     if fetch is None:
-        from providers import MARKETS as CFG, krx_day as fetch  # noqa: N811  (v0.2 adapter, key via stdin)
+        from providers import MARKETS as CFG, krx_day as fetch  # noqa: N811  (collector adapter, key via stdin)
     else:
         from providers import MARKETS as CFG
     today = kst_today(now)

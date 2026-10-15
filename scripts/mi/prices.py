@@ -1,7 +1,7 @@
 """Price series access with provenance.
 
 Priority per market: user-licensed CSV (data/licensed) > archived KRX rows + markets.json > markets.json.
-FRED rows are read from the v0.2 snapshot only; they are never copied into the SQLite archive.
+FRED rows are read from the price snapshot (markets.json) only; they are never copied into the SQLite archive.
 """
 import csv
 import json
@@ -79,9 +79,9 @@ PROVISIONAL_NOTE = '최신 종가 잠정치 (토스증권) · KRX 공식값은 �
 
 
 def latest_overlay(conn, snapshot, now_iso):
-    """v0.2-shaped entries for markets whose newest close is a provisional (Toss) row the v0.2 snapshot lacks.
-    History = snapshot history + provisional rows; indicators use the v0.2 formulas. FRED markets never appear."""
-    from collect_data import indicators   # v0.2 formulas, so cards and the Indicators tab stay consistent
+    """Snapshot-shaped entries for markets whose newest close is a provisional (Toss) row the snapshot lacks.
+    History = snapshot history + provisional rows; indicators use the collector formulas. FRED markets never appear."""
+    from collect_data import indicators   # collector formulas, so cards and the Indicators tab stay consistent
     out = {}
     for key in MARKETS:
         base = (snapshot or {}).get('markets', {}).get(key) or {}

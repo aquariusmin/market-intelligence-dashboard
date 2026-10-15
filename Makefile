@@ -13,10 +13,10 @@ setup:            ## create .venv and install the ML stack
 setup-optional:   ## optional: anthropic (briefing --llm) + playwright (UI smoke)
 	uv pip install --python $(PY) -r requirements-optional.txt || $(PY) -m pip install -r requirements-optional.txt
 
-ingest:           ## v0.2 price collector + Fed macro series
+ingest:           ## price collector + Fed macro + Toss closes
 	$(PY) scripts/mi_cli.py ingest
 
-indicators regime: ## v0.4 regime / risk / macro exports
+indicators regime: ## regime / risk / macro exports
 	$(PY) scripts/mi_cli.py regime
 
 train:            ## licence gate + walk-forward validation
@@ -40,10 +40,11 @@ morning evening weekly all:
 dev:              ## local server (127.0.0.1, allowlist, Host check, CSP): http://localhost:3000
 	python3 scripts/serve.py --port $(PORT)
 
-test:             ## offline unit tests (v0.2 stdlib + v1.0 engine) and JS syntax
+test:             ## offline unit tests (collector, engine, CLI, UI)
 	cd scripts && python3 test_data.py
 	cd scripts && $(ABS_PY) -m unittest test_mi_forecasting test_mi_analysis test_mi_cli
-	node --check real-data.js && node --check intel.js
+	node --check app.js
+	node scripts/test_ui.js
 	node --test scripts/test_intel.mjs
 
 test-ui:          ## headless browser smoke test (needs playwright in .venv)
