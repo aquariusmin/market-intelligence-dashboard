@@ -12,3 +12,7 @@ __pycache__/
 data/markets.json
 Spec.docx
 Spec-2.docx
+
+# v1.0 engine outputs (derived from provider data; local only) and environments
+data/
+.venv/

@@ -1,4 +1,4 @@
-/* v0.2: local JSON only. Original DEMO views/data stay isolated in index.html. */
+/* v0.2 base REAL DATA layer (prices + technical indicators). intel.js extends it for v1.0. DEMO views stay in index.html. */
 state.mode = 'real';
 let realData = null;
 let loadError = '';
@@ -27,9 +27,9 @@ function realHeading(title, desc, controls=true) {
   return `<div class="heading"><div><h1>${title}</h1><div class="sub">${desc} · REAL DATA</div><div class="sub">${esc(markets[state.market].name)} 기준 거래일 ${esc(m?.as_of || '이용 불가')} ${m ? '('+esc(m.timezone)+')' : ''}<br>마지막 정상 수집 ${esc(stamp(m?.updated_at))}</div></div>${controls?`<div class="controls">${selector()}${state.tab==='Forecast'?segments():''}</div>`:''}</div>`;
 }
 function renderModeChrome() {
-  document.querySelector('.topbar').innerHTML = `<span>Market Intelligence <span class="muted">/ v0.2</span></span><div class="controls"><div class="segments" aria-label="데이터 모드"><button data-mode="real" aria-pressed="${state.mode==='real'}" class="${state.mode==='real'?'active':''}">REAL DATA</button><button data-mode="demo" aria-pressed="${state.mode==='demo'}" class="${state.mode==='demo'?'active':''}">DEMO</button></div><button class="filter" data-reload ${loading?'disabled':''}>${loading?'로딩 중…':'JSON 다시 읽기'}</button></div>`;
-  document.querySelector('.sidefoot').innerHTML = `<span class="statusdot"></span>Local v0.2<br>${state.mode==='real'?'일별 종가 · 실시간 아님':'고정된 샘플 데이터'}<br><span class="tag">${state.mode==='real'?'REAL DATA':'DEMO MODE'}</span>`;
-  document.querySelector('.footer').innerHTML = `<span>MARKET INTELLIGENCE / LOCAL v0.2</span><span>${state.mode==='real'?'실제 종가 · 기술 지표는 로컬 계산 · 개인 참고용':'DEMO / SAMPLE DATA · 실제 분석 아님'}</span>`;
+  document.querySelector('.topbar').innerHTML = `<span>Market Intelligence <span class="muted">/ v1.0 local</span></span><div class="controls"><div class="segments" aria-label="데이터 모드"><button data-mode="real" aria-pressed="${state.mode==='real'}" class="${state.mode==='real'?'active':''}">REAL DATA</button><button data-mode="demo" aria-pressed="${state.mode==='demo'}" class="${state.mode==='demo'?'active':''}">DEMO</button></div><button class="filter" data-reload ${loading?'disabled':''}>${loading?'로딩 중…':'JSON 다시 읽기'}</button></div>`;
+  document.querySelector('.sidefoot').innerHTML = `<span class="statusdot"></span>Local v1.0<br>${state.mode==='real'?'일별 종가 · 실시간 아님':'고정된 샘플 데이터'}<br><span class="tag">${state.mode==='real'?'REAL DATA':'DEMO MODE'}</span>`;
+  document.querySelector('.footer').innerHTML = `<span>MARKET INTELLIGENCE / LOCAL v1.0</span><span>${state.mode==='real'?'실제 종가 · 기술 지표는 로컬 계산 · 개인 참고용':'DEMO / SAMPLE DATA · 실제 분석 아님'}</span>`;
 }
 function sourceNote(m, key=state.market) {
   return `<div class="note">출처: <a href="${sourceLinks[key]}" target="_blank" rel="noopener" style="color:var(--blue)">${esc(m?.attribution || (key==='sp'||key==='nq'?'FRED':'KRX OPEN API'))}</a><br>${esc(m?.copyright || '')}<br>${esc(availability(m))} · 마지막 수집 시도 ${esc(stamp(m?.last_attempt_at))}${m?.error?'<br><span class="neutral">'+esc(m.error)+'</span>':''}</div>`;

@@ -1,0 +1,11 @@
+# Optional local schedule (crontab -e). Runs only while this computer is on; missed runs are NOT replayed.
+# Times are KST. Jobs are idempotent: re-running the same day adds no duplicate forecasts or news rows.
+CRON_TZ=Asia/Seoul
+MI=/path/to/market-intelligence-dashboard
+# 08:00 US close check + 08:30 morning briefing (US close = 05:00 KST in EDT / 06:00 KST in EST; FRED posts later)
+0 8 * * 1-6   cd $MI && .venv/bin/python scripts/mi_cli.py ingest  >> data/cron.log 2>&1
+30 8 * * 1-6  cd $MI && .venv/bin/python scripts/mi_cli.py morning >> data/cron.log 2>&1
+# 16:30 Korea close analysis (KRX key must be exported in this environment)
+30 16 * * 1-5 cd $MI && .venv/bin/python scripts/mi_cli.py evening >> data/cron.log 2>&1
+# Sunday 10:00 weekly re-validation / retraining
+0 10 * * 0    cd $MI && .venv/bin/python scripts/mi_cli.py weekly  >> data/cron.log 2>&1
