@@ -1,13 +1,17 @@
 # Market Intelligence Dashboard — local commands. `make` is optional: each target is one documented command.
 PY ?= .venv/bin/python
+ABS_PY = $(abspath $(PY))
 PORT ?= 3000
 CHROMIUM ?=
 
-.PHONY: setup ingest indicators regime train forecast news briefing status morning evening weekly all dev test test-ui
+.PHONY: setup setup-optional ingest indicators regime train forecast news briefing status morning evening weekly all dev test test-ui
 
 setup:            ## create .venv and install the ML stack
 	uv venv .venv --python python3 || python3 -m venv .venv
 	uv pip install --python $(PY) -r requirements.txt || $(PY) -m pip install -r requirements.txt
+
+setup-optional:   ## optional: anthropic (briefing --llm) + playwright (UI smoke)
+	uv pip install --python $(PY) -r requirements-optional.txt || $(PY) -m pip install -r requirements-optional.txt
 
 ingest:           ## v0.2 price collector + Fed macro series
 	$(PY) scripts/mi_cli.py ingest
@@ -33,12 +37,12 @@ status:
 morning evening weekly all:
 	$(PY) scripts/mi_cli.py $@
 
-dev:              ## static server: http://localhost:3000
-	python3 -m http.server $(PORT) --bind 127.0.0.1
+dev:              ## local server (127.0.0.1, allowlist, Host check, CSP): http://localhost:3000
+	python3 scripts/serve.py --port $(PORT)
 
 test:             ## offline unit tests (v0.2 stdlib + v1.0 engine) and JS syntax
 	cd scripts && python3 test_data.py
-	cd scripts && ../$(PY) -m unittest test_mi_forecasting test_mi_analysis
+	cd scripts && $(ABS_PY) -m unittest test_mi_forecasting test_mi_analysis test_mi_cli
 	node --check real-data.js && node --check intel.js
 
 test-ui:          ## headless browser smoke test (needs playwright in .venv)

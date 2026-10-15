@@ -9,6 +9,7 @@ import statistics
 import sys
 import tempfile
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from providers import MARKETS, PROVIDERS, krx_day
 
 
@@ -78,7 +79,8 @@ def atomic_json(path, value):
 
 def collect(output, providers=None, today=None, selected=None):
     providers = PROVIDERS if providers is None else providers
-    today = today or date.today()
+    # Asia/Seoul is the furthest-ahead market clock here, so a valid KST-dated close is never 'future'
+    today = today or datetime.now(ZoneInfo('Asia/Seoul')).date()
     now = datetime.now(timezone.utc).isoformat(timespec='seconds')
     old = {'schema_version': 1, 'markets': {}}
     if output.exists():

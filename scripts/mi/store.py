@@ -5,7 +5,7 @@ Plain SQL (no SQLite-only types beyond TEXT/REAL/INTEGER) so the schema ports to
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import paths
 
@@ -52,24 +52,43 @@ CREATE TABLE IF NOT EXISTS news (
 CREATE TABLE IF NOT EXISTS briefings (
   id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, session TEXT NOT NULL,
   method TEXT NOT NULL, content TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS holdout_registry (
+  market TEXT NOT NULL, horizon INTEGER NOT NULL, holdout_start TEXT NOT NULL, fixed_at TEXT NOT NULL,
+  PRIMARY KEY (market, horizon));
 CREATE TABLE IF NOT EXISTS job_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, started_at TEXT NOT NULL,
   finished_at TEXT, status TEXT NOT NULL, message TEXT);
 """
+SCHEMA_VERSION = 2  # PRAGMA user_version; bump with an explicit migration step in _migrate()
+BUSY_TIMEOUT_S = 60
+STALE_JOB_HOURS = 6
 
 
 def now_utc():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
+def _owner_only(path):
+    """Archive holds licensed provider data: readable by the owner only, like the JSON outputs (0600)."""
+    for p in (path, path.with_name(path.name + '-wal'), path.with_name(path.name + '-shm')):
+        try:
+            if p.exists() and p.stat().st_mode & 0o077:
+                p.chmod(0o600)
+        except OSError:
+            pass
+
+
 @contextmanager
 def connect(path=None):
     path = path or paths.DB
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_S)
+    _owner_only(path)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute('PRAGMA journal_mode = WAL')  # readers (status, UI exports) never block the writer
     conn.executescript(SCHEMA)
+    _migrate(conn)
     try:
         yield conn
         conn.commit()
@@ -80,20 +99,42 @@ def connect(path=None):
         conn.close()
 
 
+def _migrate(conn):
+    """Forward-only schema migrations keyed on PRAGMA user_version. New tables come from SCHEMA
+    (CREATE IF NOT EXISTS); column changes to existing tables must be added here as ALTER steps."""
+    version = conn.execute('PRAGMA user_version').fetchone()[0]
+    if version < SCHEMA_VERSION:
+        # v1 -> v2: holdout_registry table (created by SCHEMA above); no column changes.
+        conn.execute('PRAGMA user_version = %d' % SCHEMA_VERSION)
+        conn.commit()
+
+
+def holdout_start(conn, market, horizon):
+    row = conn.execute('SELECT holdout_start FROM holdout_registry WHERE market=? AND horizon=?',
+                       (market, horizon)).fetchone()
+    return row[0] if row else None
+
+
+def fix_holdout_start(conn, market, horizon, start):
+    """Record the holdout start the first time a pair is evaluated; later runs reuse it (never re-drawn)."""
+    conn.execute('INSERT OR IGNORE INTO holdout_registry VALUES (?,?,?,?)', (market, horizon, start, now_utc()))
+
+
 def _upsert(conn, table, key_cols, value_col, kind, key, rows, source_id):
     """Insert new observations; on a changed value keep the newest and log the revision."""
     stamp, inserted, revised = now_utc(), 0, 0
     key_where = ' AND '.join('%s = ?' % c for c in key_cols)
     for date, value in rows:
         keys = (key, date) + ((source_id,) if 'source_id' in key_cols else ())
-        old = conn.execute('SELECT %s FROM %s WHERE %s' % (value_col, table, key_where), keys).fetchone()
+        old = conn.execute('SELECT %s, source_id FROM %s WHERE %s' % (value_col, table, key_where), keys).fetchone()
         if old is None:
             conn.execute('INSERT INTO %s (%s, date, %s, source_id, first_seen_at, updated_at) VALUES (?,?,?,?,?,?)'
                          % (table, key_cols[0], value_col), (key, date, value, source_id, stamp, stamp))
             inserted += 1
-        elif abs(old[0] - value) > 1e-12:
-            conn.execute('UPDATE %s SET %s = ?, updated_at = ? WHERE %s' % (table, value_col, key_where),
-                         (value, stamp) + keys)
+        elif abs(old[0] - value) > 1e-12 or old[1] != source_id:
+            # source_id is updated too when the key omits it (macro), so provenance follows the value.
+            conn.execute('UPDATE %s SET %s = ?, source_id = ?, updated_at = ? WHERE %s' % (table, value_col, key_where),
+                         (value, source_id, stamp) + keys)
             conn.execute('INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?)',
                          (kind, key, date, source_id, old[0], value, stamp))
             revised += 1
@@ -131,6 +172,10 @@ def macro_meta(conn):
 def job(name, path=None):
     """Record every pipeline job (status page reads this)."""
     with connect(path) as conn:
+        # A job killed by SIGKILL / power loss never reaches its UPDATE: mark such leftovers, keep the rows.
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=STALE_JOB_HOURS)).isoformat(timespec='seconds')
+        conn.execute("UPDATE job_runs SET status='interrupted', finished_at=?, message='프로세스 비정상 종료 추정' "
+                     "WHERE job=? AND status='running' AND started_at < ?", (now_utc(), name, cutoff))
         cur = conn.execute('INSERT INTO job_runs (job, started_at, status) VALUES (?,?,?)', (name, now_utc(), 'running'))
         run_id = cur.lastrowid
     result = {'message': ''}

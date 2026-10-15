@@ -1,0 +1,5 @@
+# Optional extras (not needed for the pipeline):
+#   anthropic  - `briefing --llm` paid rewrite (needs ANTHROPIC_API_KEY and explicit approval to run)
+#   playwright - `scripts/ui_smoke.py` headless UI smoke test
+anthropic>=1.14,<2
+playwright>=1.64,<2

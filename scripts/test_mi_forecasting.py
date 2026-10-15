@@ -3,7 +3,7 @@ import json
 import math
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,7 +38,7 @@ def rows(dates, closes):
 
 MANIFEST = {m: {'source_id': 'licensed:' + m, 'provider': 'test', 'dataset': 'synthetic', 'terms_url': 'test://',
                 'ml_training': 'allowed', 'local_storage': 'allowed', 'verified_on': '2026-10-15',
-                'manifest_errors': []} for m in ('sp', 'nq', 'ks', 'kq')}
+                'publication_delay_minutes': 15, 'manifest_errors': []} for m in ('sp', 'nq', 'ks', 'kq')}
 FAST_GRID = {'class_frequency': [{}], 'momentum_rule': [{}], 'logistic_regression': [{'C': 0.1}],
              'lightgbm': [{'num_leaves': 4, 'n_estimators': 60}]}
 
@@ -98,13 +98,42 @@ class LeakageTest(unittest.TestCase):
         self.assertAlmostEqual(Xu['ks_ret1'].iloc[30], (math.log(kr[30]) - math.log(kr[29])) * 100, places=9)
 
     def test_macro_publication_lag(self):
-        # H.15 value for Friday becomes usable only after Monday 17:00 ET.
-        fri = date(2026, 10, 9)
+        # H.15 value for Friday becomes usable only after the next Fed business day 17:00 ET.
+        fri = date(2026, 10, 2)
         avail = timing.macro_available_at('next_business_day_17et', [fri])[0]
-        self.assertEqual(avail.tz_convert('America/New_York').date(), date(2026, 10, 12))
+        self.assertEqual(avail.tz_convert('America/New_York').date(), date(2026, 10, 5))
         self.assertGreater(avail, timing.decision_time('sp', fri))
         h10 = timing.macro_available_at('weekly_h10', [fri])[0].tz_convert('America/New_York')
-        self.assertEqual(h10.date(), date(2026, 10, 13))
+        self.assertEqual(h10.date(), date(2026, 10, 6))
+        # Monday 2026-10-12 is Columbus Day: Friday 10-09 H.15 is posted Tuesday, so the KOSPI decision on
+        # Tuesday (16:00 KST = 03:00 ET) must not see it yet.
+        avail = timing.macro_available_at('next_business_day_17et', [date(2026, 10, 9)])[0]
+        self.assertEqual(avail.tz_convert('America/New_York').date(), date(2026, 10, 13))
+        self.assertGreater(avail, timing.decision_time('ks', date(2026, 10, 13)))
+        # Independence Day on a Saturday (2026-07-04) is observed Friday 07-03 -> Thursday's value is posted Monday
+        self.assertEqual(timing.macro_available_at('next_business_day_17et', [date(2026, 7, 2)])[0]
+                         .tz_convert('America/New_York').date(), date(2026, 7, 6))
+
+    def test_asof_ties_pick_latest_observation(self):
+        # A whole H.10 week shares one release time: the join must use the latest day, not an arbitrary one.
+        week = [date(2026, 10, 5) + timedelta(days=i) for i in range(5)]
+        rel = [timing._local(date(2026, 10, 13), time(16, 15), timing.ET)] * 5
+        dec = pd.to_datetime([timing._local(date(2026, 10, 14), time(9, 0), timing.ET)] * 3, utc=True)
+        for perm in ([0, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 4, 0, 3, 1]):
+            got = timing.asof_join(dec, [week[i] for i in perm], pd.to_datetime([rel[i] for i in perm], utc=True),
+                                   np.array([float(i) for i in perm]), 'v')
+            self.assertTrue((got == 4.0).all())
+
+    def test_unstated_licensed_publication_is_next_day(self):
+        # A licensed source without publication_delay_minutes: its close is known only next business day.
+        m = {'ks': dict(MANIFEST['ks'])}
+        m['ks'].pop('publication_delay_minutes')
+        d = [date(2026, 10, 14)]
+        late = timing.price_available_at('ks', d, 'licensed:ks', m)[0]
+        self.assertGreater(late, timing.decision_time('sp', d[0]))
+        quick = timing.price_available_at('ks', d, 'licensed:ks', MANIFEST)[0]
+        self.assertLess(quick, timing.decision_time('sp', d[0]))
+        self.assertGreater(timing.price_available_at('ks', d, 'krx_openapi')[0], timing.decision_time('sp', d[0]))
 
     def test_dst_close_times(self):
         self.assertEqual(timing.close_utc('sp', date(2026, 7, 1)).hour, 20)   # EDT
@@ -222,6 +251,53 @@ class StoreTest(unittest.TestCase):
                     exp_ret = closes[-3] / closes[-4] - 1
                     self.assertAlmostEqual(hist[0]['actual_return'], exp_ret)
                     self.assertGreater(conn.execute('SELECT COUNT(*) FROM backtest_predictions').fetchone()[0], 0)
+                    # the retrain duplicate on the same cutoff is kept in the table but counted once
+                    summ = forecasting.live_summary(forecasting.evaluated_live(conn))
+                    self.assertEqual([e['n'] for e in summ], [1])
+                    # a second training run reuses the holdout fixed by the first and records the earlier verdict
+                    perf2 = forecasting.train(conn, markets=['sp'], horizons=(1,), manifest=MANIFEST, log=lambda *a: None,
+                                              cfg_overrides={'min_train': 400, 'step': 63, 'bootstrap': 100})
+                    e1, e2 = perf['markets']['sp']['1'], perf2['markets']['sp']['1']
+                    self.assertEqual(e2['spans']['holdout'][0], e1['spans']['holdout'][0])
+                    self.assertEqual(e2['holdout_fixed'], e1['spans']['holdout'][0])
+                    self.assertEqual(e2['previous_run']['run_id'], e1['run_id'])
+                    self.assertNotEqual(e2['run_id'], e1['run_id'])
+
+    def test_live_summary_covers_whole_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with store.connect(Path(tmp) / 'mi.sqlite') as conn:
+                base = date(2024, 1, 1)
+                for i in range(500):   # more than live_history's display limit
+                    conn.execute("INSERT INTO forecasts (kind, created_at, market, horizon, model_name, model_version, "
+                                 "input_cutoff, decision_time_utc, p_bull, p_neutral, p_bear, threshold, base_close, "
+                                 "expected_outcome_date, validation_status, status, actual_class, provenance) "
+                                 "VALUES ('live','t','sp',1,'m','v1',?,'t',.5,.3,.2,.01,100,'t','validated',"
+                                 "'evaluated','bullish','{}')", ((base + timedelta(days=i)).isoformat(),))
+                self.assertEqual(len(forecasting.live_history(conn)), 400)
+                summ = forecasting.live_summary(forecasting.evaluated_live(conn))[0]
+                self.assertEqual(summ['n'], 500)
+                self.assertAlmostEqual(summ['accuracy'], 1.0)
+                self.assertAlmostEqual(summ['brier'], .25 + .09 + .04)
+                self.assertIsNone(summ['warning'])
+                self.assertGreater(summ['skill_vs_uniform'], 0)
+
+    def test_price_revision_logged_and_job_interrupted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / 'mi.sqlite'
+            with store.connect(db) as conn:
+                self.assertEqual(store.upsert_prices(conn, 'ks', [('2026-10-14', 2600.0)], 'krx_openapi'), (1, 0))
+                self.assertEqual(store.upsert_prices(conn, 'ks', [('2026-10-14', 2600.0)], 'krx_openapi'), (0, 0))
+                self.assertEqual(store.upsert_prices(conn, 'ks', [('2026-10-14', 2601.5)], 'krx_openapi'), (0, 1))
+                rev = conn.execute('SELECT old_value, new_value FROM observation_revisions').fetchall()
+                self.assertEqual([tuple(r) for r in rev], [(2600.0, 2601.5)])
+                self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], store.SCHEMA_VERSION)
+                conn.execute("INSERT INTO job_runs (job, started_at, status) VALUES ('train', '2020-01-01T00:00:00+00:00', 'running')")
+            with store.job('train', db):
+                pass
+            with store.connect(db) as conn:
+                st = [r[0] for r in conn.execute("SELECT status FROM job_runs WHERE job='train' ORDER BY id")]
+            self.assertEqual(st, ['interrupted', 'ok'])
 
 
 if __name__ == '__main__':

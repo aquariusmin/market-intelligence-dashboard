@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import briefing, events, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import briefing, events, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -71,16 +71,74 @@ class RegimeTest(unittest.TestCase):
         self.assertIn('krw', regime.risk_components(row, 'ks', {'USDKRW_ret20': 1.5}))
         self.assertNotIn('krw', regime.risk_components(row, 'sp', {'USDKRW_ret20': 1.5}))
 
+    def test_risk_reports_component_coverage(self):
+        up = np.exp(np.linspace(0, .6, 320) + np.random.default_rng(1).normal(0, .004, 320)) * 100
+        risk = regime.analyze('sp', self.series(up), {})['risk']
+        self.assertEqual(risk['components_available'], '2/5')
+        self.assertEqual(risk['components_missing'], ['vix', 'credit', 'rates'])
+        self.assertIn('components', risk)
+        ks = regime.analyze('ks', self.series(up), {})['risk']
+        self.assertEqual(ks['components_available'], '2/6')
+        self.assertIn('krw', ks['components_missing'])
+
+    def row(self, **kw):
+        base = dict(close=100.0, sma200=95.0, dist_sma200=5.26, mom20=1.0, vol20_pct=.5, vol20=15.0,
+                    drawdown252=-2.0, rsi14=55.0)
+        return pd.Series(dict(base, **kw))
+
+    def test_vol_factor_at_one_year_high(self):
+        _, bear = regime.factors(self.row(vol20_pct=1.0, vol20=31.0), None, 'sp')
+        self.assertIn('20일 실현변동성 31.0% · 최근 1년 최고 수준', bear)
+        self.assertFalse(any('상위 0%' in f for f in bear))
+        _, bear = regime.factors(self.row(vol20_pct=.8), None, 'sp')
+        self.assertIn('20일 실현변동성 15.0% · 최근 1년 중 상위 20%', bear)
+
+    def test_rate_factor_matches_risk_definition_and_shows_reference_date(self):
+        for chg, txt in ((-0.30, '-30bp'), (0.28, '+28bp')):
+            bull, bear = regime.factors(self.row(), {'UST10Y_chg20': chg, 'UST10Y_obs': '2026-10-13'}, 'sp')
+            self.assertFalse(any('금리' in f for f in bull))  # a large move either way is rate-volatility stress
+            self.assertIn('미국 10년물 금리 20일간 %s · 금리 변동성 확대 (기준 10-13)' % txt, bear)
+        d = bdays(320)
+        ust = {'UST10Y': [(x.isoformat(), 4.0 + 0.02 * i) for i, x in enumerate(d)]}
+        r = regime.analyze('sp', self.series(walk(320, 3)), ust)
+        rate = [f for f in r['bearish_factors'] if '10년물' in f]
+        self.assertEqual(len(rate), 1)
+        self.assertRegex(rate[0], r'\(기준 \d{2}-\d{2}\)$')
+
 
 class GateRuleTest(unittest.TestCase):
     def test_probability_only_gain_without_direction_is_not_validated(self):
         cfg = validation.Config(horizon=20)
         r = {'effective_n': 60, 'ece': .02, 'vs_class_frequency': {
-            'ci90_low': .002, 'brier_skill': .007, 'balanced_accuracy_delta': 0.0}}
+            'ci90_low': .002, 'brier_ci90_low': .001, 'brier_skill': .007, 'balanced_accuracy_delta': 0.0}}
         g = validation.gate(r, 'momentum_rule', cfg)
         self.assertEqual(g['status'], 'not_validated')
         r['vs_class_frequency']['balanced_accuracy_delta'] = .05
         self.assertEqual(validation.gate(r, 'momentum_rule', cfg)['status'], 'validated')
+
+    def test_model_worse_than_strongest_baseline_is_not_validated(self):
+        cfg = validation.Config(horizon=5)
+        good = {'ci90_low': .01, 'brier_ci90_low': .002, 'brier_skill': .02, 'balanced_accuracy_delta': .05}
+        r = {'effective_n': 60, 'ece': .02, 'log_loss': 1.0, 'dev_log_loss': 1.0, 'vs_class_frequency': dict(good),
+             'vs_best_baseline': dict(good, baseline='momentum_rule')}
+        self.assertEqual(validation.gate(r, 'lightgbm', cfg)['status'], 'validated')
+        r['vs_best_baseline'].update(ci90_low=-.004, brier_ci90_low=-.001)
+        g = validation.gate(r, 'lightgbm', cfg)
+        self.assertEqual(g['status'], 'not_validated')
+        self.assertTrue(any('momentum_rule' in x for x in g['reasons']))
+        # and a large development -> holdout degradation is flagged as overfitting
+        r['vs_best_baseline'].update(ci90_low=.01, brier_ci90_low=.002)
+        r['log_loss'] = 1.2
+        self.assertIn('과적합', ' '.join(validation.gate(r, 'lightgbm', cfg)['reasons']))
+
+    def test_gate_settings_cannot_be_overridden(self):
+        with self.assertRaises(ValueError):
+            forecasting.train(None, cfg_overrides={'max_ece': 0.5})
+
+    def test_ece_reports_worst_class(self):
+        p = np.tile([0.2, 0.6, 0.2], (100, 1))
+        y = np.array([1] * 60 + [0] * 40)   # neutral perfectly calibrated, bearish/bullish off by 0.2
+        self.assertAlmostEqual(validation.reliability(p, y)[1], 0.2, places=9)
 
 
 class MacroTest(unittest.TestCase):
@@ -179,6 +237,63 @@ class NewsTest(unittest.TestCase):
         self.assertEqual(news.categorize('기준금리 동결'), 'Monetary Policy')
         self.assertEqual(news.categorize('Gardening tips'), 'Other')
 
+    def test_classification_word_boundaries(self):
+        # former false positives from open-ended \w* suffixes and the bare 경기 keyword
+        self.assertNotEqual(news.categorize('An important update for shareholders'), 'Trade')
+        self.assertNotEqual(news.categorize('Warner Bros shares climb'), 'Geopolitics')
+        self.assertNotEqual(news.categorize('경기도 아파트 분양 일정'), 'Economic Growth')
+        self.assertEqual(news.categorize('Warner Bros shares climb'), 'Other')
+        # true positives (English inflections + Korean compounds)
+        self.assertEqual(news.categorize('US imposes new tariffs on steel imports'), 'Trade')
+        self.assertEqual(news.categorize('Korea exports rise for a third month'), 'Trade')
+        self.assertEqual(news.categorize('War risk lifts oil prices'), 'Geopolitics')
+        self.assertEqual(news.categorize('Geopolitical tensions weigh on Asia'), 'Geopolitics')
+        self.assertEqual(news.categorize('SEC charges adviser with fraud'), 'Financial Stability')
+        self.assertEqual(news.categorize('경기 둔화 우려 확산'), 'Economic Growth')
+        self.assertEqual(news.categorize('경기침체 신호'), 'Economic Growth')
+        self.assertEqual(news.categorize('반도체 수출 증가'), 'Trade')
+
+    def test_importance_age_penalty_applied_on_read(self):
+        now = datetime(2026, 10, 15, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp, store.connect(Path(tmp) / 'db.sqlite') as conn:
+            news.collect(conn, request=lambda u: self.RSS, use_gdelt=False, now=now, log=lambda *a: None)
+            stored = conn.execute('SELECT importance FROM news').fetchone()[0]
+            self.assertEqual(stored, 5)  # Monetary Policy (3) + official (1) + 1, no age penalty stored
+            fresh = news.recent(conn, now=now)[0]
+            self.assertEqual((fresh['importance'], fresh['base_importance']), (5, 5))
+            old = news.recent(conn, now=datetime(2026, 10, 20, tzinfo=timezone.utc))[0]
+            self.assertEqual((old['importance'], old['base_importance']), (4, 5))
+            self.assertEqual(conn.execute('SELECT importance FROM news').fetchone()[0], 5)  # history unchanged
+
+    def test_gdelt_429_stops_remaining_queries(self):
+        calls = []
+
+        def req(url):
+            if 'gdelt' in url:
+                calls.append(url)
+                raise RuntimeError('데이터 요청 실패 (HTTP 429, curl code 0) · 요청 한도 초과')
+            return self.RSS
+        with tempfile.TemporaryDirectory() as tmp, store.connect(Path(tmp) / 'db.sqlite') as conn:
+            r = news.collect(conn, request=req, sleep=lambda s: None, log=lambda *a: None,
+                             now=datetime(2026, 10, 15, tzinfo=timezone.utc))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(r['gdelt_doc']['status'], 'failed')
+        self.assertIn('429', r['gdelt_doc']['error'])
+
+    def test_unlicensed_provider_is_not_stored(self):
+        gd = json.dumps({'articles': [{'url': 'https://x.example/n', 'title': 'Nasdaq tumbles on chip fears',
+                                       'seendate': '20261014T120000Z', 'domain': 'x.example', 'language': 'English'}]})
+        req = lambda url: gd if 'gdelt' in url else self.RSS
+        with tempfile.TemporaryDirectory() as tmp, store.connect(Path(tmp) / 'db.sqlite') as conn, \
+                patch('mi.licenses.storage_allowed', side_effect=lambda sid, manifest=None: sid != 'gdelt_doc'):
+            r = news.collect(conn, request=req, sleep=lambda s: None, log=lambda *a: None,
+                             now=datetime(2026, 10, 15, tzinfo=timezone.utc))
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM news WHERE provider='gdelt_doc'").fetchone()[0], 0)
+            self.assertEqual(r['added'], 1)
+        self.assertEqual(r['skipped_unlicensed'], 1)  # both GDELT queries return it; URL dedupe keeps one
+        self.assertEqual(r['gdelt_doc']['storage'], 'skipped')
+        self.assertEqual(r['gdelt_doc']['status'], 'ok')
+
     def test_collect_stores_metadata_only_and_is_idempotent(self):
         gd = json.dumps({'articles': [{'url': 'https://x.example/n', 'title': 'Nasdaq tumbles on chip fears',
                                        'seendate': '20261014T120000Z', 'domain': 'x.example', 'language': 'English'}]})
@@ -213,6 +328,16 @@ class NewsTest(unittest.TestCase):
         self.assertIsNone(sentiment.score('코스피 급락', 'ko')['label'])
         self.assertEqual(sentiment.score('Stocks plunge', 'en')['label'], 'negative')
 
+    def test_english_sentiment_negation(self):
+        from mi import sentiment
+        self.assertEqual(sentiment.score('Fed delivers rate cut', 'en')['label'], 'positive')
+        no_cut = sentiment.score('Fed signals no rate cut this year', 'en')
+        self.assertEqual(no_cut['label'], 'negative')
+        self.assertEqual(no_cut['method'], 'lexicon-en-v2')  # still the low-confidence heuristic
+        self.assertEqual(sentiment.score('Earnings not weak after all', 'en')['label'], 'positive')
+        self.assertEqual(sentiment.score('Markets rally without fear', 'en')['label'], 'positive')
+        self.assertEqual(sentiment.score("Margins don't improve", 'en')['label'], 'negative')
+
 
 class EventsBriefingTest(unittest.TestCase):
     HTML = ('<h4><a id="1">2026 FOMC Meetings</a></h4><div class="fomc-meeting__month col"><strong>October</strong></div>'
@@ -228,6 +353,14 @@ class EventsBriefingTest(unittest.TestCase):
         down = events.upcoming(date(2026, 10, 15), request=boom)
         self.assertEqual(down['status']['fomc'], 'failed')
         self.assertEqual(down['items'], [])
+
+    def test_fomc_meeting_spanning_year_end(self):
+        html = ('<h4>2026 FOMC Meetings</h4><div class="fomc-meeting__month"><strong>December</strong></div>'
+                '<div class="fomc-meeting__date">8-9*</div><div class="fomc-meeting__month"><strong>Dec/Jan</strong></div>'
+                '<div class="fomc-meeting__date">31-1</div>'
+                '<h4>2027 FOMC Meetings</h4><div class="fomc-meeting__month"><strong>January</strong></div>'
+                '<div class="fomc-meeting__date">26-27</div>')
+        self.assertEqual([e['date'] for e in events.parse_fomc(html)], ['2026-12-09', '2027-01-01', '2027-01-27'])
 
     def brief(self):
         r = regime.analyze('sp', rows(bdays(320), walk(320, 3)), {})
@@ -247,6 +380,69 @@ class EventsBriefingTest(unittest.TestCase):
         self.assertIn('미검증', s['market_forecast'][0])
         self.assertIn('licence', s['market_forecast'][1])
         self.assertEqual(b['method'], 'rule-based-v1')
+
+    def test_restricted_build_keeps_labels_but_no_price_derived_numbers(self):
+        r = regime.analyze('sp', rows(bdays(320), walk(320, 3)), {})
+        r['source_id'] = 'fred_sp500'
+        shown = briefing.build({'sp': r}, {}, {}, [], {'items': []})
+        kept = briefing.build({'sp': r}, {}, {}, [], {'items': []}, restricted={'sp'})
+        self.assertIn('20거래일 수익률', shown['sections']['us_overview'][0])
+        para = kept['sections']['us_overview'][0]
+        self.assertIn(briefing.REGIME_KO[r['regime']], para)
+        self.assertNotIn('%', para)
+        self.assertNotIn('%s점' % r['risk']['score'], kept['sections']['executive_summary'])
+        withheld = [f for f in kept['sections']['bullish_factors'] + kept['sections']['bearish_factors']
+                    if f.startswith('S&P 500 ·')]
+        self.assertTrue(withheld and all('보관하지 않음' in f and '%' not in f for f in withheld))
+        self.assertNotIn('뚜렷한', ' '.join(kept['sections']['bullish_factors'] if r['bullish_factors'] else []))
+        self.assertEqual(kept['redacted_markets'], ['sp'])
+        self.assertNotIn('redacted_markets', shown)
+
+    def test_missing_vol_is_unavailable_not_zero(self):
+        r = regime.analyze('sp', rows(bdays(320), walk(320, 3)), {})
+        r['metrics']['vol20'] = None
+        p = briefing.market_paragraph('sp', r)
+        self.assertIn('20일 실현변동성 이용 불가', p)
+        self.assertNotIn('0.0%', p)
+
+    def test_news_newest_first_and_age_at_read_time(self):
+        mk = lambda i, pub, imp: {'title': 't%d' % i, 'url': 'https://e.example/%d' % i, 'source': 's',
+                                  'category': 'Inflation', 'importance': imp, 'base_importance': imp,
+                                  'published_at': pub}
+        items = [mk(1, '2026-10-13T00:00:00+00:00', 4), mk(2, '2026-10-14T00:00:00+00:00', 4),
+                 mk(3, '2026-10-01T00:00:00+00:00', 4), mk(4, '2026-10-14T06:00:00+00:00', 5)]
+        b = briefing.build({}, {}, {}, items, {'items': []}, now=datetime(2026, 10, 15, tzinfo=timezone.utc))
+        got = [(n['title'], n['importance']) for n in b['sections']['news']]
+        self.assertEqual(got, [('t4', 5), ('t2', 4), ('t1', 4), ('t3', 3)])  # t3 is >72h old at read time
+
+    FACTS = json.dumps({'us_overview': [
+        'S&P 500는 2026-10-14 기준 상승 추세 · 낮은 변동성 국면입니다 (추세 점수 +3/5, 12일째). 20거래일 수익률 +2.21%, '
+        '60거래일 +4.10%, 20일 실현변동성 12.3%, 52주 고점 대비 -1.5%. 위험 수준은 보통(26.9점)입니다.',
+        'NASDAQ 100는 2026-10-14 기준 횡보 · 중립 국면입니다 (추세 점수 +1/5, 4일째). 20거래일 수익률 -0.80%, '
+        '60거래일 +1.20%, 20일 실현변동성 18.4%, 52주 고점 대비 -6.2%. 위험 수준은 보통(38.6점)입니다.']},
+        ensure_ascii=False)
+
+    def assertRejected(self, text, why):
+        with self.assertRaisesRegex(ValueError, why):
+            briefing.validate_llm({'executive_summary': text}, self.FACTS)
+
+    def test_llm_validation_adversarial(self):
+        self.assertRejected('NASDAQ 위험 26.9점, S&P 38.6점, 모멘텀 -2.21%로 상승할 것으로 보입니다', '')  # review repro
+        self.assertRejected('NASDAQ 100 위험 점수는 26.9점이고, S&P 500 위험 점수는 38.6점입니다.', '다른 시장')
+        self.assertRejected('나스닥의 20거래일 수익률은 +2.21%로 집계되었습니다.', '다른 시장')
+        self.assertRejected('S&P 500의 20거래일 수익률은 -2.21%로 집계되었습니다.', '부호')
+        self.assertRejected('NASDAQ 100의 20거래일 수익률은 0.80%로 집계되었습니다.', '부호')
+        self.assertRejected('S&P 500 위험 점수는 26.9점이며 앞으로 상승할 가능성이 큽니다.', '전망·권유')
+        self.assertRejected('S&P 500 위험 점수는 26.9점으로 상승 전망이 우세합니다.', '전망·권유')
+        self.assertRejected('S&P 500은 26.9점으로 지금이 매수 기회입니다.', '전망·권유')
+        self.assertRejected('NASDAQ 100의 위험 점수는 S&P 500의 두 배 수준에 가깝습니다.', '배수')
+        self.assertRejected('S&P 500 위험 점수는 27.5점으로 보통 수준입니다.', '없는 수치')
+
+    def test_llm_validation_accepts_faithful_rewrite(self):
+        text = ('S&P 500는 상승 추세(추세 점수 +3/5)로 20거래일 수익률 +2.21%, 위험 점수 26.9점입니다. '
+                'NASDAQ 100는 횡보 국면이며 20거래일 수익률 -0.80%, 52주 고점 대비 -6.2%, 위험 점수 38.6점입니다. '
+                '두 시장 모두 위험 수준은 보통이며, 국면 분류는 현재 상태의 서술입니다.')
+        self.assertEqual(briefing.validate_llm({'executive_summary': text}, self.FACTS)['executive_summary'], text)
 
     def test_llm_is_opt_in_and_validated(self):
         b = self.brief()
@@ -273,6 +469,16 @@ class EventsBriefingTest(unittest.TestCase):
         self.assertEqual(status, 'ok')
         self.assertEqual(good['sections']['executive_summary'], good_text)
         self.assertEqual(good['sections']['market_forecast'], b['sections']['market_forecast'])
+
+        class Spy(Fake):
+            def create(self, **kw):
+                self.seen = kw['messages'][0]['content']
+                return super().create(**kw)
+        spy, facts = Spy(json.dumps({'executive_summary': good_text}, ensure_ascii=False)), json.loads(json.dumps(b))
+        facts['sections']['us_overview'] = ['REDACTED VIEW']
+        briefing.llm_rewrite(b, spy, facts_brief=facts)
+        self.assertIn('REDACTED VIEW', spy.seen)   # the model sees the restricted copy, not the display copy
+        self.assertNotIn(b['sections']['us_overview'][0], spy.seen)
 
 
 class JobLogTest(unittest.TestCase):

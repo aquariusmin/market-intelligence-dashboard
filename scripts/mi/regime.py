@@ -82,6 +82,9 @@ def macro_frame(macro_rows, market, dates):
                    sid + '_pct': indicators.trailing_percentile(s, 252, 126)}
         for name, series in derived.items():
             out[name] = timing.asof_join(decisions, obs, avail, series.to_numpy(), name)
+        # observation date of the value known at each decision (display only, e.g. "(기준 10-13)")
+        out[sid + '_obs'] = timing.asof_join(decisions, obs, avail, np.array([d.isoformat() for d in obs], dtype=object),
+                                             sid + '_obs')
     return out
 
 
@@ -121,7 +124,9 @@ def factors(row, m, market):
         (bull if row.mom20 > 0 else bear).append('20거래일 모멘텀 %s%%' % f(row.mom20, 2))
     if math.isfinite(row.vol20_pct):
         if row.vol20_pct >= VOL_HIGH_PCT:
-            bear.append('20일 실현변동성 %.1f%% · 최근 1년 중 상위 %d%%' % (row.vol20, round((1 - row.vol20_pct) * 100)))
+            top = round((1 - row.vol20_pct) * 100)
+            bear.append('20일 실현변동성 %.1f%% · %s' % (row.vol20, '최근 1년 최고 수준' if top < 1 else
+                                                     '최근 1년 중 상위 %d%%' % top))
         elif row.vol20_pct <= 0.3:
             bull.append('20일 실현변동성 %.1f%% · 최근 1년 대비 낮은 수준' % row.vol20)
     if math.isfinite(row.drawdown252) and row.drawdown252 <= -10:
@@ -140,7 +145,11 @@ def factors(row, m, market):
             (bear if c > 0 else bull).append('하이일드 스프레드 20일간 %+.0fbp' % (c * 100))
         r = m.get('UST10Y_chg20')
         if r is not None and math.isfinite(r) and abs(r) >= 0.25:
-            (bear if r > 0 else bull).append('미국 10년물 금리 20일간 %+.0fbp' % (r * 100))
+            # Same definition as the 'rates' risk component (abs change = rate-volatility stress): a large move
+            # in either direction is listed as a risk, never as a bullish factor.
+            obs = m.get('UST10Y_obs')
+            ref = ' (기준 %s)' % obs[5:] if isinstance(obs, str) else ''
+            bear.append('미국 10년물 금리 20일간 %+.0fbp · 금리 변동성 확대%s' % (r * 100, ref))
         k = m.get('USDKRW_ret20')
         if market in ('ks', 'kq') and k is not None and math.isfinite(k) and abs(k) >= 1.5:
             (bear if k > 0 else bull).append('원화 %s (USD/KRW 20일 %+.1f%%)' % ('약세' if k > 0 else '강세', k))
@@ -189,7 +198,10 @@ def analyze(market, price_rows, macro_rows, history_len=260):
                                               'dist_sma200', 'mom5', 'mom20', 'mom60', 'vol20', 'vol60',
                                               'vol20_pct', 'drawdown252', 'rsi14', 'macd_histogram')},
         'risk': {'score': score, 'level': band_en, 'level_ko': band_ko,
-                 'components': {k: num(v, 3) for k, v in comps.items()}},
+                 'components': {k: num(v, 3) for k, v in comps.items()},
+                 # score averages only the available components: expose coverage, e.g. "3/5"
+                 'components_available': '%d/%d' % (sum(v is not None for v in comps.values()), len(comps)),
+                 'components_missing': [k for k, v in comps.items() if v is None]},
         'bullish_factors': bull, 'bearish_factors': bear,
         'history': [{'date': ts.date().isoformat(), 'regime': r.regime, 'raw': r.raw_regime,
                      'trend_score': int(r.trend_score),

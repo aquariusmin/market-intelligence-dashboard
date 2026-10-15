@@ -16,3 +16,9 @@ Spec-2.docx
 # v1.0 engine outputs (derived from provider data; local only) and environments
 data/
 .venv/
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
+# Playwright MCP output and Claude Code lock files
+.playwright/
+.claude/*.lock
+.claude/settings.local.json

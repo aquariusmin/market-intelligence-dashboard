@@ -14,7 +14,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import providers
 
-from . import sentiment, store
+from . import licenses, sentiment, store
 
 UA = 'MarketIntelligenceLocal/1.0 (personal research; contact via repository owner)'
 FEEDS = {
@@ -30,17 +30,24 @@ GDELT_QUERIES = {
 }
 
 CATEGORIES = [  # first match wins; English + Korean keywords
-    ('Monetary Policy', r'\b(fomc|federal open market|monetary policy|interest rate|rate (cut|hike)s?|discount rate|'
-                        r'policy rate|central bank|fed chair|powell|bank of korea|ecb)\b|기준금리|금통위|통화정책'),
-    ('Inflation', r'\b(inflation|cpi|pce|consumer price|producer price|ppi)\b|물가|인플레이션'),
+    # English terms use word boundaries with explicit inflections only (no open-ended \w* suffixes, which
+    # matched "important" -> import, "Warner" -> war). Korean 경기 is limited to economic compounds so
+    # that e.g. 경기도 (the province) does not count as growth news.
+    ('Monetary Policy', r'\b(fomc|federal open market|monetary policy|interest rates?|rate (cut|hike)s?|discount rate|'
+                        r'policy rates?|central banks?|fed chair|powell|bank of korea|ecb)\b|기준금리|금통위|통화정책'),
+    ('Inflation', r'\b(inflation|cpi|pce|consumer prices?|producer prices?|ppi)\b|물가|인플레이션'),
     ('Employment', r'\b(jobs|payrolls|unemployment|jobless|labor market|employment)\b|고용|실업'),
-    ('Economic Growth', r'\b(gdp|recession|economic growth|retail sales|manufacturing|pmi|consumer spending)\b|성장률|경기'),
-    ('Earnings', r'\b(earnings|quarterly results|revenue|profit|guidance|eps)\b|실적|영업이익'),
-    ('Financial Stability', r'\b(bank failure|stress test|financial stability|liquidity|capital requirement|'
-                            r'supervis|enforcement|fraud|charges|settle)\w*|금융안정|부실'),
-    ('Trade', r'\b(tariff|trade (war|deal|deficit)|exports?|imports?|sanction)\w*|관세|수출'),
-    ('Geopolitics', r'\b(war|military|missile|geopolit|conflict|election|north korea)\w*|지정학|북한'),
-    ('Technology', r'\b(ai|artificial intelligence|semiconductor|chip|nvidia|tech stocks?|software)\b|반도체'),
+    ('Economic Growth', r'\b(gdp|recessions?|economic growth|retail sales|manufacturing|pmi|consumer spending)\b|'
+                        r'성장률|경기\s?(침체|둔화|회복|부진|지표|하강|확장|부양|선행지수|동행지수)'),
+    ('Earnings', r'\b(earnings|quarterly results|revenues?|profits?|guidance|eps)\b|실적|영업이익'),
+    ('Financial Stability', r'\b(bank failures?|stress tests?|financial stability|liquidity|capital requirements?|'
+                            r'supervision|supervisory|supervisors?|enforcement|fraud|charges|charged|'
+                            r'settles?|settled|settlements?)\b|금융안정|부실'),
+    ('Trade', r'\b(tariffs?|trade (war|deal|deficit)s?|exports?|exported|imports?|imported|sanctions?|sanctioned)\b|'
+              r'관세|수출'),
+    ('Geopolitics', r'\b(wars?|military|missiles?|geopolitics|geopolitical|conflicts?|elections?|north korea)\b|'
+                    r'지정학|북한'),
+    ('Technology', r'\b(ai|artificial intelligence|semiconductors?|chips?|nvidia|tech stocks?|software)\b|반도체'),
 ]
 CATEGORY_WEIGHT = {'Monetary Policy': 3, 'Inflation': 3, 'Employment': 2, 'Economic Growth': 2,
                    'Financial Stability': 2, 'Earnings': 1, 'Trade': 2, 'Geopolitics': 2, 'Technology': 1}
@@ -77,12 +84,22 @@ def related(title, default):
     return out or list(default)
 
 
-def importance(category, official, published_at, now):
-    score = 1 + CATEGORY_WEIGHT.get(category, 0) + (1 if official else 0)
+def base_importance(category, official):
+    """Importance as stored at ingest time: depends only on category and source, never on age."""
+    return max(1, min(5, 1 + CATEGORY_WEIGHT.get(category, 0) + (1 if official else 0)))
+
+
+def effective_importance(base, published_at, now):
+    """Read-time importance: the stored base minus an age penalty computed against `now` (not ingest time)."""
+    score = base
     if published_at:
         age = (now - datetime.fromisoformat(published_at)).total_seconds() / 3600
         score -= 1 if age > 72 else 0
     return max(1, min(5, score))
+
+
+def importance(category, official, published_at, now):
+    return effective_importance(base_importance(category, official), published_at, now)
 
 
 def parse_rss(text, source_id):
@@ -113,6 +130,8 @@ def parse_gdelt(text, default_markets):
     for a in data.get('articles') or []:
         if not a.get('url') or not a.get('title'):
             continue
+        # GDELT `seendate` is when GDELT's crawler first saw the article (crawl time), not the publisher's
+        # timestamp. It is stored in published_at (schema unchanged) and is an upper bound on publication time.
         seen = a.get('seendate')  # 20261015T120000Z
         published = (datetime.strptime(seen, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc).isoformat(timespec='seconds')
                      if seen else None)
@@ -180,6 +199,9 @@ def collect(conn, request=None, sleep=time.sleep, now=None, use_gdelt=True, log=
                 got_total += len(got)
             except Exception as exc:
                 err = str(exc)[:300]
+                if 'HTTP 429' in str(exc):  # rate-limited: do not issue the remaining queries in this run
+                    err += ' · 남은 GDELT 쿼리 생략'
+                    break
         report['gdelt_doc'] = {'status': 'ok' if err is None else ('partial' if got_total else 'failed'),
                                'items': got_total, 'error': err}
         log('gdelt_doc: %s' % report['gdelt_doc'])
@@ -188,18 +210,25 @@ def collect(conn, request=None, sleep=time.sleep, now=None, use_gdelt=True, log=
                                       "AND collected_at >= ?", ((now - timedelta(days=4)).isoformat(),))]
     known = {r['id'] for r in conn.execute('SELECT id FROM news')}
     fresh = [it for it in items if news_id(it['url']) not in known]
-    added = 0
+    added, skipped = 0, {}
     for it in dedupe(fresh, existing):
+        if not licenses.storage_allowed(it['provider']):  # unverified storage permission -> never archived
+            skipped[it['provider']] = skipped.get(it['provider'], 0) + 1
+            continue
         cat = categorize(it['title'])
         sent = sentiment.score(it['title'], it['language'])
         conn.execute('INSERT OR IGNORE INTO news VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                      (news_id(it['url']), it['title'][:500], it['source'][:200], it['url'][:1000],
                       it['published_at'], now.isoformat(timespec='seconds'), it['language'],
                       store.dumps(related(it['title'], it['default_markets'])), cat, sent['label'], sent['score'],
-                      sent['method'], importance(cat, it['official'], it['published_at'], now),
+                      sent['method'], base_importance(cat, it['official']),  # age penalty applied on read
                       'duplicate' if it['duplicate_of'] else 'processed', it['duplicate_of'], it['provider']))
         added += 1
     report['added'] = added
+    report['skipped_unlicensed'] = sum(skipped.values())
+    for provider, n in skipped.items():
+        entry = report.setdefault(provider, {'status': 'ok', 'items': 0, 'error': None})
+        entry.update(storage='skipped', skipped=n, reason='licenses.storage_allowed 불통과 · 저장하지 않음')
     return report
 
 
@@ -212,5 +241,8 @@ def recent(conn, days=14, limit=200, now=None):
     for r in rows:
         d = dict(r)
         d['related_markets'] = json.loads(d['related_markets'])
+        # Rows stored before v1.0.1 may already include an ingest-time age penalty; they are not rewritten.
+        d['base_importance'] = d['importance']
+        d['importance'] = effective_importance(d['importance'], d['published_at'], now)
         out.append(d)
     return out

@@ -1,11 +1,15 @@
 # Optional local schedule (crontab -e). Runs only while this computer is on; missed runs are NOT replayed.
-# Times are KST. Jobs are idempotent: re-running the same day adds no duplicate forecasts or news rows.
+# Times below are KST. Debian/Ubuntu cron (incl. WSL) ignores CRON_TZ, so either set the system timezone
+# to Asia/Seoul (sudo timedatectl set-timezone Asia/Seoul, or TZ in /etc/default/cron) or shift the hours.
+# CRON_TZ is kept for cronie-based systems (Fedora/RHEL/Arch), where it is honoured.
 CRON_TZ=Asia/Seoul
 MI=/path/to/market-intelligence-dashboard
-# 08:00 US close check + 08:30 morning briefing (US close = 05:00 KST in EDT / 06:00 KST in EST; FRED posts later)
-0 8 * * 1-6   cd $MI && .venv/bin/python scripts/mi_cli.py ingest  >> data/cron.log 2>&1
-30 8 * * 1-6  cd $MI && .venv/bin/python scripts/mi_cli.py morning >> data/cron.log 2>&1
-# 16:30 Korea close analysis (KRX key must be exported in this environment)
-30 16 * * 1-5 cd $MI && .venv/bin/python scripts/mi_cli.py evening >> data/cron.log 2>&1
+# scripts/cron_run.sh sources ~/.config/mi/env (chmod 600; e.g. `export KRX_API_KEY=...`), creates data/ for the
+# log and wraps each run in flock so jobs never overlap.
+# 08:30 morning briefing (ingest is part of `morning`; US close = 05:00 KST in EDT / 06:00 KST in EST)
+30 8 * * 1-6  $MI/scripts/cron_run.sh morning
+# 16:30 Korea close analysis. KRX OPEN API daily index data may only appear the next morning;
+# the 08:30 run then picks it up, and timing.py treats KRX closes as known only from 08:00 KST next day.
+30 16 * * 1-5 $MI/scripts/cron_run.sh evening
 # Sunday 10:00 weekly re-validation / retraining
-0 10 * * 0    cd $MI && .venv/bin/python scripts/mi_cli.py weekly  >> data/cron.log 2>&1
+0 10 * * 0    $MI/scripts/cron_run.sh weekly

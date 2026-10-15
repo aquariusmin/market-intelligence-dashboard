@@ -6,7 +6,8 @@ FRED rows are read from the v0.2 snapshot only; they are never copied into the S
 import csv
 import json
 import math
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from . import licenses, paths, store
 
@@ -29,7 +30,7 @@ def read_snapshot(path=None):
 
 
 def validate_rows(rows, today=None):
-    today = today or date.today()
+    today = today or datetime.now(ZoneInfo('Asia/Seoul')).date()  # furthest-ahead market clock
     out, last = [], ''
     for r in rows:
         d, c = str(r['date']), r['close']

@@ -29,8 +29,10 @@ def parse_fomc(html):
                 continue
             month = months[-1]
             last = int(days[-1])
+            # A meeting listed under year Y that spans "Dec/Jan" ends in January of Y+1.
+            end_year = year + 1 if month < months[0] else year
             try:
-                d = date(year, month, last)
+                d = date(end_year, month, last)
             except ValueError:
                 continue
             out.append({'date': d.isoformat(), 'title': 'FOMC 회의 결과 발표 (%s %s)' % (m.group(1).strip(), m.group(2).strip()),

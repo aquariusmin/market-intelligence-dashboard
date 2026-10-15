@@ -31,18 +31,19 @@ make briefing                   # 규칙 기반 한국어 브리핑 → briefing
 make status                     # 시스템 상태 → status.json
 
 # 4) 대시보드
-make dev                        # = python3 -m http.server 3000 --bind 127.0.0.1
+make dev                        # = python3 scripts/serve.py --port 3000 (127.0.0.1 전용 · 허용 파일만 · Host 검사 · CSP)
 ```
 
 [http://localhost:3000](http://localhost:3000) 접속 후, 명령 실행 뒤에는 화면의 **JSON 다시 읽기**를 누르세요(로컬 파일만 읽음). FastAPI 백엔드는 도입하지 않았습니다. 모든 결과가 정적 JSON이므로 `localhost:8000` 서버는 필요 없습니다.
 
-복합 작업: `make morning` / `make evening` (ingest→regime→forecast→news→briefing), `make weekly` (ingest→regime→train→forecast), `make all`. 한 단계가 실패해도 나머지 단계는 계속 실행됩니다.
+복합 작업: `make morning` / `make evening` (ingest→regime→forecast→news→briefing), `make weekly` (ingest→regime→train→forecast), `make all`. 한 단계가 실패해도 나머지 단계와 마지막 status 갱신은 계속 실행되고, 실패한 단계가 있으면 종료 코드 1과 traceback을 남깁니다. 브리핑은 실패한 단계나 3일 넘게 지난 입력을 `input_warnings`로 표시합니다.
 
 선택 옵션:
-- `mi_cli.py ingest --with-fred-risk`: FRED에 게시된 VIX·ICE 신용스프레드를 **표시 전용**으로 가져옵니다(SQLite 보관 안 함). FRED/ICE 약관이 저장·복제를 제한하므로 기본은 꺼져 있고, 켜는 판단은 사용자 몫입니다.
+- `mi_cli.py ingest --with-fred-risk`: FRED에 게시된 VIX·ICE 신용스프레드를 **표시 전용**으로 가져옵니다(SQLite 보관 안 함). FRED/ICE 약관이 저장·복제를 제한하므로 기본은 꺼져 있고, 켜는 판단은 사용자 몫입니다. 표시용 `fred_risk.json`은 3일이 지나면 무시·삭제됩니다.
 - `mi_cli.py briefing --llm`: `ANTHROPIC_API_KEY`가 있을 때 요약 문단만 Claude(`claude-opus-5-5`, effort low, 서버측 refusal fallback 사용)로 다듬습니다. **유료 호출**이므로 명시적으로 플래그를 줄 때만 실행되며, 입력에 없는 수치가 나오면 결과를 버리고 규칙 기반 문장을 유지합니다. `pip install anthropic` 필요.
 - `MI_FINBERT=1`: `transformers`가 설치돼 있으면 영문 제목 감성에 ProsusAI/finbert(CC BY-NC-SA 4.0, 비상업용)를 사용합니다. 기본 설치에는 포함하지 않았습니다.
-- `MI_DATA_DIR=/path`: 데이터 디렉터리 변경(테스트·격리용).
+- `MI_DATA_DIR=/path`: 데이터 디렉터리 변경(테스트·격리용). 가격 수집기 출력(`markets.json`)도 이 디렉터리에 씁니다.
+- 선택 의존성: `make setup-optional`(= `requirements-optional.txt`: `briefing --llm`용 `anthropic`, UI 스모크용 `playwright`).
 
 ### 라이선스가 확인된 가격 데이터로 예측 활성화
 
@@ -51,25 +52,35 @@ ML 학습 권한을 보유한 데이터(예: 계약한 유료 공급원)가 있�
 ```json
 {"markets": {"sp": {"file": "sp.csv", "provider": "공급자명", "dataset": "S&P 500 daily close",
   "terms_url": "https://…계약/약관 URL", "ml_training": "allowed", "local_storage": "allowed",
-  "redistribution": "not_allowed", "verified_on": "YYYY-MM-DD"}}}
+  "redistribution": "not_allowed", "verified_on": "YYYY-MM-DD", "publication_delay_minutes": 15}}}
 ```
+
+`publication_delay_minutes`는 공급자가 일별 종가를 장 마감 후 몇 분 뒤 제공하는지입니다. 적지 않으면 종가를 다음 영업일 09:00(거래소 현지 시각)에야 알 수 있다고 보수적으로 가정합니다.
 
 필수 항목이 비거나 `ml_training`이 `allowed`가 아니면 학습을 거부합니다. 이 파일은 사용자가 보유한 권한을 기록하는 곳이며, 프로그램이 권한을 만들어내거나 가정하지 않습니다. 이후 `make train && make forecast`를 실행하세요.
 
 ### 자동 갱신 (선택)
 
-`scripts/schedule.example.cron`에 KST 기준 예시가 있습니다(`CRON_TZ=Asia/Seoul`).
+`scripts/schedule.example.cron`에 KST 기준 예시가 있습니다. `CRON_TZ`는 cronie 계열에서만 동작하며, Debian/Ubuntu(WSL 포함) cron은 무시하므로 시스템 시간대를 Asia/Seoul로 두거나 시각을 환산하세요. 각 작업은 `scripts/cron_run.sh`로 실행되며, 이 래퍼가 `~/.config/mi/env`(권한 600, `export KRX_API_KEY=...`)를 읽고 `flock`으로 작업 중복 실행을 막습니다.
 
 | KST | 작업 |
 | --- | --- |
-| 08:00 (월–토) | `ingest`: 미국 종가 확인. 미국 장 마감은 서머타임 기준 05:00 KST, 표준시 06:00 KST이고 FRED 게시는 그보다 늦습니다. |
-| 08:30 (월–토) | `morning`: 아침 브리핑 |
-| 16:30 (월–금) | `evening`: 한국장 마감 분석 (KRX 키 필요) |
+| 08:30 (월–토) | `morning`(ingest 포함): 아침 브리핑. 미국 장 마감은 서머타임 기준 05:00 KST, 표준시 06:00 KST입니다. |
+| 16:30 (월–금) | `evening`: 한국장 마감 분석 (KRX 키 필요). KRX 일별 지수가 다음 날 아침에 게시되면 08:30 실행에서 반영됩니다. |
 | 일 10:00 | `weekly`: 재검증·재학습 |
 
 - **로컬 컴퓨터가 꺼져 있거나 잠자기 상태면 실행되지 않으며, 놓친 실행을 나중에 재실행하지 않습니다.**
-- 휴장일·게시 지연이 있으면 새 관측값이 없을 뿐입니다. 모든 작업은 멱등적이어서 같은 날 다시 실행해도 예측·뉴스가 중복 저장되지 않습니다.
+- 휴장일·게시 지연이 있으면 새 관측값이 없을 뿐입니다. 같은 날 다시 실행해도 같은 모델 버전의 예측과 뉴스는 중복 저장되지 않습니다. 브리핑과 백테스트 실행 기록은 실행마다 추가됩니다(이력). 재학습으로 모델 버전이 바뀌어 같은 기준일 예측이 한 행 더 생기면, 표에는 남기되 실시간 성과 집계에서는 처음 기록만 셉니다.
 - 서머타임은 `zoneinfo`로 처리합니다.
+
+### 보안 기본값
+
+- **키:** `KRX_API_KEY`·`ANTHROPIC_API_KEY`는 환경변수로만 읽습니다. KRX 키는 curl 설정(stdin)으로만 전달되어 명령줄·로그·오류 메시지에 남지 않습니다. cron 환경 파일은 본인 소유이고 그룹·기타 쓰기 권한이 없을 때만 읽습니다(아니면 실행 거부).
+- **네트워크:** 모든 외부 요청은 HTTPS만 허용합니다(리다이렉트 포함, `--proto =https`). 인증 헤더가 있는 요청은 리다이렉트를 따라가지 않습니다.
+- **로컬 서버:** `scripts/serve.py`는 127.0.0.1에만 바인딩합니다. 대시보드 파일(`index.html`, JS 2개, `data/markets.json`, `data/dashboard/*.json`)만 제공하고 `.git`·`.venv`·`data/mi.sqlite`·로그는 404로 막습니다. Host가 localhost/127.0.0.1이 아니면 421을 반환해 DNS 리바인딩을 막고, 외부 출처를 허용하지 않는 CSP를 보냅니다. `python3 -m http.server`는 저장소 전체를 노출하므로 쓰지 마세요.
+- **로컬 파일:** JSON 출력과 SQLite(`-wal`/`-shm` 포함)는 소유자 전용(0600)입니다. cron 실행은 `umask 077`입니다.
+- **화면:** 외부에서 온 문자열은 모두 `esc()`로 이스케이프합니다. 링크는 http(s)만 허용하고 `noopener noreferrer`를 붙입니다.
+- **LLM(옵트인):** 뉴스 제목은 보내지 않습니다. 보관이 허용되지 않은 소스(FRED)의 수치도 보내지 않습니다.
 
 ---
 
@@ -105,6 +116,8 @@ KRX OPEN API (키 필요) ───────┤                              
 - `scripts/mi_cli.py`: 파이프라인 진입점. 단계별 실패를 격리하고 `job_runs`에 기록합니다. 결과 JSON은 원자적으로 교체됩니다.
 - SQLite 스키마는 표준 SQL 타입만 사용하므로 PostgreSQL로 옮길 수 있습니다. 값이 바뀌면 `observation_revisions`에 이력을 남기고, 행을 삭제하지 않습니다.
 - FRED 시세는 약관상 저장·보관이 금지되어 SQLite에 복사하지 않습니다. v0.2 스냅샷만 읽습니다.
+- 브리핑은 화면용과 보관용을 따로 만듭니다. `briefings` 테이블과 옵트인 LLM 입력에는 `storage_allowed()`를 통과하지 못한 소스(FRED)의 가격 파생 수치(수익률·변동성·낙폭·위험 점수)를 넣지 않고 국면·위험 등급 라벨만 남깁니다(`redacted_markets`). 2026-10-15 이전에 저장된 2건은 이력 보존 원칙에 따라 그대로 둡니다.
+- **알려진 라이선스 위험:** v0.2 `data/markets.json`은 기존 동작대로 FRED 원시 종가(약 800일)를 디스크에 보관합니다. FRED 약관의 저장·캐시 금지 조항과 충돌할 소지가 있습니다. 미국 지수의 라이선스 데이터를 확보하면 교체할 예정입니다(`CODE_REVIEW.md` C1, `ROADMAP.md`).
 
 ## C. Model Methodology
 
@@ -118,7 +131,9 @@ KRX OPEN API (키 필요) ───────┤                              
 **시점 정합성.** 모든 관측값에 `available_at`(UTC), 모든 예측에 `decision_time`(장 마감 +30분)을 부여하고 `available_at ≤ decision_time`인 값만 as-of 조인합니다.
 
 - 한국 예측(16:00 KST)은 전일 미국 종가까지만 봅니다. 당일 미국 종가는 아직 없습니다. 미국 예측은 당일 한국 종가를 봅니다.
-- H.15는 익영업일 17:00 ET, H.10은 주간 게시(다음 주 화요일 16:15 ET)로 보수적으로 지연시켰습니다.
+- H.15는 익영업일 17:00 ET, H.10은 주간 게시(다음 주 화요일 16:15 ET)로 보수적으로 지연시켰습니다. 영업일은 미국 연방 공휴일(Fed 휴일)을 반영합니다.
+- 교차시장 가격은 소스별 게시 시각을 씁니다. KRX OPEN API는 다음 평일 08:00 KST, 사용자 라이선스 데이터는 manifest의 `publication_delay_minutes`(없으면 다음 영업일 09:00)입니다.
+- 같은 시각에 게시된 관측값(예: H.10 한 주치)은 가장 최근 관측일 값을 씁니다.
 - 서머타임 전환 구간 테스트를 포함합니다.
 
 **피처.**
@@ -133,20 +148,21 @@ KRX OPEN API (키 필요) ───────┤                              
 - 딥러닝은 도입하지 않았습니다.
 
 **검증.**
-1. 평가 가능 구간을 시간순으로 **개발(40%) → purge 간격 → holdout(60%)**으로 나눕니다.
+1. 평가 가능 구간을 시간순으로 **개발(40%) → purge 간격 → holdout(60%)**으로 나눕니다. holdout 시작일은 시장·기간별 첫 실행 때 `holdout_registry`에 고정되고 이후 재학습에서도 다시 정하지 않습니다. 매 실행에는 직전 판정(`previous_run`)이 함께 기록됩니다.
 2. 개발 구간의 walk-forward에서 하이퍼파라미터·보정 방법·주 모델을 log loss로 선택합니다.
 3. holdout 결과만 보고합니다.
 4. 각 fold(21일마다 재학습, 확장 창 기본·rolling 선택)는 **fit → purge → 보정(마지막 25%) → purge → test** 순서입니다.
 5. 표본 i는 결과 관측 위치 i+h+embargo가 다음 구간 시작보다 앞설 때만 사용해, 겹치는 5D/20D 구간을 제거합니다.
 
-**지표.** Accuracy, Balanced Accuracy, Macro F1, 혼동행렬, 다중클래스 Brier, Log Loss, 클래스별 신뢰도 곡선과 ECE, 63일 rolling accuracy, 기준 모델 대비 Brier skill, log loss 개선의 이동 블록 부트스트랩 90% CI(블록 ≥ h).
+**지표.** Accuracy, Balanced Accuracy, Macro F1, 혼동행렬, 다중클래스 Brier, Log Loss, 클래스별 신뢰도 곡선과 ECE(가장 나쁜 클래스의 값), 63일 rolling accuracy, 기준 모델 대비 Brier skill, log loss·Brier 개선의 이동 블록 부트스트랩 90% CI(블록 = max(2h, n^(1/3), 10)).
 
 **검증 통과 기준(사전 고정).** 아래를 모두 만족해야 `VALIDATED`입니다. 그렇지 않으면 확률을 흐리게 표시하고 "신뢰할 수 있는 예측이 아님"과 사유를 함께 보여줍니다.
-- 비중첩 holdout 표본(n/h) ≥ 50
-- log loss 개선 CI 하한 > 0
-- Brier skill > 0
+- 유효 holdout 표본 ≥ 50: 비중첩 표본(n/h)을 손실 차이의 1차 자기상관으로 한 번 더 줄인 값
+- class_frequency **와 가장 강한 비교 모델** 각각에 대해 log loss 개선 CI 하한 > 0, Brier 개선 CI 하한 > 0. 가장 강한 비교 모델은 holdout log loss 기준이며, 후보는 기준 모델(class_frequency, momentum_rule)이고 LightGBM에는 로지스틱 회귀도 포함됩니다.
 - **Balanced accuracy가 기준 모델보다 2%p 이상 높음** (확률만 날카로워지고 방향 정보가 없는 모델 배제)
-- ECE ≤ 0.08
+- ECE ≤ 0.08 (클래스별 ECE 중 최댓값)
+- holdout log loss가 개발 구간보다 10% 넘게 나쁘지 않음 (과적합 신호)
+- 이 기준(`validation.GATE_FIELDS`)은 실행 중에 덮어쓸 수 없습니다. 지금은 실데이터 학습 결과가 없는 상태에서 강화한 것입니다(2026-10-15).
 
 **평가 성능.** 실데이터 결과는 **없습니다**(라이선스 게이트).
 
@@ -185,8 +201,8 @@ Copyright © S&P Dow Jones Indices LLC / Nasdaq, Inc. / Korea Exchange. 데이�
 
 ```sh
 make test      # 또는 아래 세 명령
-cd scripts && python3 test_data.py                                            # v0.2: 11 tests OK
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis  # v1.0: 34 tests OK
+cd scripts && python3 test_data.py                                            # v0.2: 12 tests OK
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 65 tests OK
 node --check real-data.js && node --check intel.js                            # OK
 MI_CHROMIUM=<chromium> .venv/bin/python scripts/ui_smoke.py                    # 24 views, 2 widths: OK
 ```
@@ -238,6 +254,8 @@ UI 스모크(headless Chromium)는 REAL/DEMO × 6탭 × 2시장 × 3기간 × �
 | v0.8 | `mi/briefing.py` (규칙 기반 + 옵트인 LLM) |
 | v0.9 | `mi/store.py`(SQLite), `scripts/mi_cli.py`, `Makefile`, cron 예시 |
 | v1.0 | `intel.js`, `index.html` 탭·스타일 확장, `scripts/ui_smoke.py` |
+
+위 번호는 모듈이 추가된 순서입니다. 다음 릴리스부터는 `ROADMAP.md`의 번호(v0.4 Daily Market Intelligence, v0.5 Market Forecasting, v0.6 AI News Intelligence)를 따릅니다. 이 번호는 이미 구현된 기능을 제외한 남은 작업만 다룹니다.
 
 ---
 

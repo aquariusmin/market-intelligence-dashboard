@@ -1,6 +1,8 @@
 # ML / analysis stack (collector in scripts/collect_data.py stays stdlib-only)
-numpy>=2.0
-pandas>=2.2
-scikit-learn>=1.5
-lightgbm>=4.3
-scipy>=1.13
+# Upper bounds: a major release (or scikit-learn 1.10, which deprecates LogisticRegression(C=...))
+# must be adopted deliberately and re-validated, never picked up by a fresh `setup`.
+numpy>=2.0,<3
+pandas>=2.2,<4
+scikit-learn>=1.5,<1.10
+lightgbm>=4.3,<5
+scipy>=1.13,<2

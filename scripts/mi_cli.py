@@ -14,6 +14,7 @@ import argparse
 import json
 import subprocess
 import sys
+import traceback
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,11 +24,13 @@ from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer from v
 from mi import VERSION, briefing, events, forecasting, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
+FRED_RISK_TTL = timedelta(days=3)   # display-only FRED snapshot: ignored and removed once older than this
+STALE_INPUT = timedelta(days=3)     # briefing flags inputs generated longer ago than this
 
 
 def write(name, value):
     atomic_json(OUT(name), value)
-    print('wrote %s' % OUT(name).relative_to(paths.ROOT) if OUT(name).is_relative_to(paths.ROOT) else OUT(name))
+    print('wrote %s' % (OUT(name).relative_to(paths.ROOT) if OUT(name).is_relative_to(paths.ROOT) else OUT(name)))
 
 
 def read(name, default=None):
@@ -37,21 +40,40 @@ def read(name, default=None):
         return default
 
 
+def _age(stamp):
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+
+
 def transient_risk():
+    """FRED VIX / ICE display snapshot (opt-in). FRED terms restrict caching, so it is honoured only while
+    fresh and deleted once it expires; it never enters training (dataset drops these features)."""
     snap = read('fred_risk.json') or {}
+    age = _age(snap.get('fetched_at'))
+    if snap and (age is None or age > FRED_RISK_TTL):
+        OUT('fred_risk.json').unlink(missing_ok=True)
+        return {}
     return {sid: [tuple(r) for r in rows] for sid, rows in (snap.get('series') or {}).items()}
 
 
 def cmd_ingest(args):
     with store.job('ingest') as res:
-        code = 0
+        code, archive_error = 0, None
         if not args.skip_prices:
-            cmd = [sys.executable, str(Path(__file__).resolve().parent / 'collect_data.py')]
+            # --output keeps MI_DATA_DIR experiments away from the real data/markets.json
+            cmd = [sys.executable, str(Path(__file__).resolve().parent / 'collect_data.py'),
+                   '--output', str(paths.MARKETS_JSON)]
             if args.markets:
                 cmd += ['--markets', *args.markets]
             code = subprocess.run(cmd).returncode
         with store.connect() as conn:
-            archived = prices.ingest_snapshot(conn)
+            try:  # a broken snapshot must not stop the macro collection below
+                archived = prices.ingest_snapshot(conn)
+            except Exception as exc:
+                archived, archive_error = None, '%s: %s' % (type(exc).__name__, exc)
+                traceback.print_exc()
             results, transient = macro.collect(conn, with_fred_risk=args.with_fred_risk)
         if transient:
             write('fred_risk.json', {'note': '표시 전용 스냅샷 (보관 아님) · 사용자 옵트인 --with-fred-risk',
@@ -59,10 +81,11 @@ def cmd_ingest(args):
         elif OUT('fred_risk.json').exists() and not args.with_fred_risk:
             OUT('fred_risk.json').unlink()  # opt-in withdrawn: drop the display snapshot
         write('ingest.json', {'ran_at': store.now_utc(), 'price_collector_exit': code, 'archive': archived,
-                              'macro': results})
+                              'archive_error': archive_error, 'macro': results})
         failed = [k for k, v in results.items() if v['status'] in ('stale', 'unavailable')]
-        res['status'] = 'ok' if code == 0 and not failed else 'partial'
-        res['message'] = 'prices exit %s; macro failed: %s' % (code, ','.join(failed) or 'none')
+        res['status'] = 'ok' if code == 0 and not failed and not archive_error else 'partial'
+        res['message'] = 'prices exit %s; archive %s; macro failed: %s' % (
+            code, 'error' if archive_error else 'ok', ','.join(failed) or 'none')
         print(res['message'])
 
 
@@ -106,10 +129,10 @@ def cmd_forecast(args):
         resolved = forecasting.resolve_outcomes(conn)
         perf = read('performance.json') or {}
         out = forecasting.forecast(conn, perf, markets=args.markets, transient_macro=transient_risk())
-        hist = forecasting.live_history(conn)
         out['resolved_this_run'] = resolved
-        out['history'] = hist
-        out['live_summary'] = forecasting.live_summary(hist)
+        out['history'] = forecasting.live_history(conn)        # recent rows for display
+        out['live_summary'] = forecasting.live_summary(forecasting.evaluated_live(conn))  # whole history
+        conn.commit()  # forecast.json must never claim rows the database does not hold
         write('forecast.json', out)
         n = sum(1 for hs in out['markets'].values() for f in hs.values() if f.get('status') != 'unavailable')
         res['status'] = 'ok' if n else 'unavailable'
@@ -122,7 +145,7 @@ def cmd_news(args):
         report = news.collect(conn, use_gdelt=not args.no_gdelt)
         items = news.recent(conn)
         write('news.json', {'generated_at': store.now_utc(), 'report': report, 'items': items,
-                            'sentiment_note': '영문 제목 키워드 휴리스틱(lexicon-en-v1) · 한국어 감성 미산출 · 참고용',
+                            'sentiment_note': '영문 제목 키워드 휴리스틱(lexicon-en-v2) · 한국어 감성 미산출 · 참고용',
                             'model_licenses': licenses.MODELS,
                             'separation_note': '뉴스 분석은 예측 모델 입력으로 사용하지 않습니다.'})
         failed = [k for k, v in report.items() if isinstance(v, dict) and v.get('status') == 'failed']
@@ -148,6 +171,27 @@ def prev_forecast_changes(conn):
     return out
 
 
+def input_warnings(failed_stages=()):
+    """Inputs the briefing had to reuse: a stage that failed in this run, or a file older than STALE_INPUT."""
+    out = ['이번 실행에서 %s 단계 실패 · 이전 결과 사용' % s for s in failed_stages if s in ('regime', 'forecast', 'news')]
+    for name in ('regime.json', 'forecast.json', 'news.json'):
+        stamp = (read(name) or {}).get('generated_at')
+        age = _age(stamp)
+        if stamp is None:
+            out.append('%s 없음' % name)
+        elif age is None or age > STALE_INPUT:
+            out.append('%s이 오래됨 (%s 생성)' % (name, stamp[:10]))
+    return out
+
+
+def restricted_markets(regimes):
+    """Markets whose price source fails licenses.storage_allowed (e.g. FRED): numbers derived from them are
+    shown on screen but never archived in SQLite or sent to an external API."""
+    manifest = licenses.licensed_manifest()
+    return {k for k, r in regimes.items()
+            if r and r.get('source_id') and not licenses.storage_allowed(r['source_id'], manifest)}
+
+
 def cmd_briefing(args):
     with store.job('briefing') as res, store.connect() as conn:
         reg = (read('regime.json') or {}).get('markets', {})
@@ -155,15 +199,23 @@ def cmd_briefing(args):
         fc = read('forecast.json') or {}
         nw = (read('news.json') or {}).get('items', [])
         ev = events.upcoming()
-        brief = briefing.build(reg, mac, fc, nw, ev, prev_forecast_changes(conn), session=args.session)
-        brief['events_status'] = ev['status']
-        brief['next_fomc'] = ev['next_fomc']
+        prev, now = prev_forecast_changes(conn), datetime.now(timezone.utc)
+        brief = briefing.build(reg, mac, fc, nw, ev, prev, session=args.session, now=now)
+        # the archived copy (and the LLM input) carries no numbers derived from sources that may not be stored
+        kept = briefing.build(reg, mac, fc, nw, ev, prev, session=args.session, now=now,
+                              restricted=restricted_markets(reg))
         llm_status = 'not requested'
         if args.llm:
-            brief, llm_status = briefing.llm_rewrite(brief)
-        brief['llm_status'] = llm_status
+            brief, llm_status = briefing.llm_rewrite(brief, facts_brief=kept)
+            if llm_status == 'ok':
+                kept['sections']['executive_summary'] = brief['sections']['executive_summary']
+                kept['method'] = brief['method']
+        for b in (brief, kept):
+            b.update(events_status=ev['status'], next_fomc=ev['next_fomc'], llm_status=llm_status,
+                     input_warnings=input_warnings(getattr(args, 'failed_stages', ())))
         conn.execute('INSERT INTO briefings (created_at, session, method, content) VALUES (?,?,?,?)',
-                     (brief['generated_at'], brief['session'], brief['method'], store.dumps(brief)))
+                     (kept['generated_at'], kept['session'], kept['method'], store.dumps(kept)))
+        conn.commit()
         write('briefing.json', brief)
         res['message'] = '%s · llm %s' % (brief['method'], llm_status)
         print(res['message'])
@@ -171,7 +223,10 @@ def cmd_briefing(args):
 
 def cmd_status(args):
     with store.connect() as conn:
-        snap = prices.read_snapshot() or {'markets': {}}
+        try:  # a broken snapshot is reported in status.json instead of leaving a stale status page
+            snap, snap_error = prices.read_snapshot() or {'markets': {}}, None
+        except (OSError, ValueError) as exc:
+            snap, snap_error = {'markets': {}}, '%s: %s' % (type(exc).__name__, exc)
         jobs = [dict(r) for r in conn.execute('SELECT * FROM job_runs ORDER BY id DESC LIMIT 40')]
         last = lambda name: next((j for j in jobs if j['job'] == name), None)
         perf = read('performance.json') or {}
@@ -183,6 +238,7 @@ def cmd_status(args):
             'prices': {m: {k: (snap['markets'].get(m) or {}).get(k) for k in
                            ('status', 'as_of', 'updated_at', 'last_attempt_at', 'error', 'attribution')}
                        for m in prices.MARKETS},
+            'snapshot_error': snap_error,
             'price_archive': {m: conn.execute('SELECT COUNT(*), MAX(date) FROM prices WHERE market=?', (m,)).fetchone()[:]
                               for m in prices.MARKETS},
             'macro': store.macro_meta(conn), 'ingest': read('ingest.json'),
@@ -202,17 +258,30 @@ def cmd_status(args):
     write('status.json', status)
 
 
+def run_stage(name, args):
+    """Run one stage; return True on success. Failures are printed with a traceback, never raised."""
+    try:
+        COMMANDS[name](args)
+        return True
+    except Exception as exc:
+        print('%s failed: %s' % (name, exc), file=sys.stderr)
+        traceback.print_exc()
+        return False
+
+
 def run_all(names, args):
-    failures = []
+    """Exit code 1 when any stage raised (including the final status export); 'partial' / 'unavailable'
+    job results are recorded in job_runs and status.json but are expected states, not failures."""
+    args.failed_stages = []
     for name in names:
         print('== %s' % name)
-        try:
-            COMMANDS[name](args)
-        except Exception as exc:  # one failed stage must not stop the others
-            failures.append(name)
-            print('%s failed: %s' % (name, exc), file=sys.stderr)
-    cmd_status(args)
-    return 1 if failures else 0
+        if not run_stage(name, args):  # one failed stage must not stop the others
+            args.failed_stages.append(name)
+    if not run_stage('status', args):
+        args.failed_stages.append('status')
+    if args.failed_stages:
+        print('failed stages: %s' % ', '.join(args.failed_stages), file=sys.stderr)
+    return 1 if args.failed_stages else 0
 
 
 COMMANDS = {'ingest': cmd_ingest, 'regime': cmd_regime, 'train': cmd_train, 'forecast': cmd_forecast,
@@ -241,8 +310,8 @@ def main(argv=None):
             args.session = args.command
         return run_all(COMPOSITE[args.command], args)
     COMMANDS[args.command](args)
-    if args.command != 'status':
-        cmd_status(args)
+    if args.command != 'status' and not run_stage('status', args):
+        return 1
     return 0
 
 

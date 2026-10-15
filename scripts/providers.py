@@ -48,7 +48,8 @@ def request_text(url, headers=None, json_body=None):
 def _request_text_once(url, headers=None, json_body=None):
     # curl's OS certificate store; keys travel only through stdin, never argv/logs.
     args = ['curl', '--silent', '--show-error', '--connect-timeout', '10',
-            '--max-time', '30', '--max-filesize', '10000000']
+            '--max-time', '30', '--max-filesize', '10000000',
+            '--proto', '=https', '--proto-redir', '=https']  # no plain-http, file:// or other schemes, even via redirect
     if not headers:
         args.append('--location')  # Never forward an AUTH_KEY across redirects.
     config = ''
@@ -124,7 +125,10 @@ def krx_day(config, day):
     r = matches[0]
     if r.get('BAS_DD', '').replace('/', '').replace('-', '') != day.strftime('%Y%m%d'):
         raise ValueError('KRX 기준일 불일치')
-    return {'date': day.isoformat(), 'close': float(r['CLSPRC_IDX'].replace(',', ''))}
+    raw = str(r.get('CLSPRC_IDX', '')).replace(',', '').strip()
+    if raw in ('', '-'):
+        return None  # listed but no close yet: treat like a not-yet-published day, never as 0
+    return {'date': day.isoformat(), 'close': float(raw)}
 
 
 def krx(config, previous, today):

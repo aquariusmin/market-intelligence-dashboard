@@ -7,22 +7,20 @@ and fails on console errors, page errors, horizontal overflow or missing panels.
   .venv/bin/python scripts/ui_smoke.py [--root .] [--shots /tmp/shots] [--chromium PATH]
 """
 import argparse
-import functools
-import http.server
 import os
 import sys
 import threading
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import serve as local_server  # noqa: E402
+
 TABS = ['Overview', 'Forecast', 'Indicators', 'News Intelligence', 'Model Performance', 'System Status']
 
 
 def serve(root):
-    class Quiet(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-    handler = functools.partial(Quiet, directory=str(root))
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    # the same allowlist / Host check / CSP as `scripts/serve.py`, so a CSP violation fails the smoke test
+    srv = local_server.server(root)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

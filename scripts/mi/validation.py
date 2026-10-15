@@ -33,10 +33,18 @@ class Config:
     dev_frac: float = 0.4         # share of evaluable span used for tuning; rest = untouched holdout
     min_effective_holdout: int = 50
     bootstrap: int = 500
-    max_ece: float = 0.08
+    max_ece: float = 0.08           # worst per-class ECE (see reliability), not the class average
     min_bal_acc_gain: float = 0.02  # directional information beyond the base rate, not just sharper probabilities
+    max_dev_holdout_gap: float = 0.10  # holdout log loss may exceed the development log loss by at most 10%
+    holdout_start: str = ''         # ISO date fixed at the first run for this market/horizon; '' = derive from dev_frac
     seed: int = 0
     extras: dict = field(default_factory=dict)
+
+
+# Gate criteria are fixed a priori and can never be overridden at run time (see forecasting.train).
+GATE_FIELDS = ('min_effective_holdout', 'max_ece', 'min_bal_acc_gain', 'max_dev_holdout_gap', 'dev_frac',
+               'holdout_start', 'embargo')
+BASELINES = ('class_frequency', 'momentum_rule')
 
 
 # ---------------- metrics ----------------
@@ -51,12 +59,15 @@ def log_loss(p, y):
 
 
 def reliability(p, y, bins=10):
-    """Per-class reliability (predicted prob bin vs observed frequency) and expected calibration error."""
+    """Per-class reliability (predicted prob bin vs observed frequency) and expected calibration error.
+
+    ECE = max over classes of sum_b n_b |pred_b - obs_b| / n. Taking the worst class (instead of the
+    class average) keeps a badly calibrated minority class from being diluted by well-calibrated ones."""
     y = np.asarray(y, int)
-    out, ece_terms = {}, []
+    out, per_class = {}, []
     edges = np.linspace(0, 1, bins + 1)
     for k, name in enumerate(['bearish', 'neutral', 'bullish']):
-        rows = []
+        rows, ece_terms = [], []
         idx = np.clip(np.digitize(p[:, k], edges) - 1, 0, bins - 1)
         for b in range(bins):
             m = idx == b
@@ -66,7 +77,8 @@ def reliability(p, y, bins=10):
             rows.append({'bin': b, 'predicted': round(pred, 4), 'observed': round(obs, 4), 'n': int(m.sum())})
             ece_terms.append(m.sum() * abs(pred - obs))
         out[name] = rows
-    ece = float(sum(ece_terms) / (len(y) * K)) if len(y) else None
+        per_class.append(sum(ece_terms) / len(y) if len(y) else None)
+    ece = float(max(per_class)) if len(y) else None
     return out, ece
 
 
@@ -112,6 +124,27 @@ def per_sample_logloss(p, y):
     return -np.log(np.clip(p[np.arange(len(y)), np.asarray(y, int)], 1e-12, 1))
 
 
+def per_sample_brier(p, y):
+    return ((p - np.eye(K)[np.asarray(y, int)]) ** 2).sum(1)
+
+
+def bootstrap_block(n, horizon):
+    """Block length for the moving-block bootstrap: overlapping h-day labels plus regime persistence."""
+    return max(2 * horizon, int(math.ceil(n ** (1 / 3))), 10)
+
+
+def effective_n(d, horizon):
+    """Non-overlapping sample count, shrunk further by the lag-1 autocorrelation of the non-overlapping
+    loss differences (AR(1) variance inflation). Never larger than n // h."""
+    base = len(d) // horizon
+    sub = np.asarray(d)[::horizon]
+    if len(sub) < 3 or np.std(sub) == 0:
+        return int(base)
+    rho = float(np.corrcoef(sub[:-1], sub[1:])[0, 1])
+    rho = min(max(rho if np.isfinite(rho) else 0.0, 0.0), 0.99)
+    return int(base * (1 - rho) / (1 + rho))
+
+
 # ---------------- splitting ----------------
 
 def usable_before(s, outcome_pos, labelled, cfg, lo=0):
@@ -139,7 +172,7 @@ def folds(n, outcome_pos, labelled, cfg, start, end):
         yield fit, cal, test
 
 
-def spans(n, outcome_pos, labelled, cfg):
+def spans(n, outcome_pos, labelled, cfg, dates=None):
     """(dev_start, dev_end, hold_start, hold_end): dev and holdout separated by a purge gap."""
     lab = np.flatnonzero(labelled)
     if not len(lab):
@@ -153,8 +186,15 @@ def spans(n, outcome_pos, labelled, cfg):
     if first is None:
         return None
     last = lab[-1] + 1
-    dev_end = first + int((last - first) * cfg.dev_frac)
-    hold_start = dev_end + cfg.horizon + cfg.embargo
+    if cfg.holdout_start and dates is not None:
+        # Fixed holdout: reuse the start date recorded at the first run so it is never re-drawn.
+        hold_start = next((i for i, d in enumerate(dates) if d >= cfg.holdout_start), last)
+        dev_end = hold_start - cfg.horizon - cfg.embargo
+        if dev_end <= first:
+            return None
+    else:
+        dev_end = first + int((last - first) * cfg.dev_frac)
+        hold_start = dev_end + cfg.horizon + cfg.embargo
     if hold_start >= last:
         return None
     return first, dev_end, hold_start, last
@@ -185,11 +225,11 @@ def evaluate(ds, cfg, log=lambda *a: None):
     X, y = ds['X'], ds['y']
     labelled = y.notna().to_numpy()
     outcome_pos = ds['outcome_pos']
-    sp = spans(len(X), outcome_pos, labelled, cfg)
+    dates = [d.date().isoformat() for d in X.index]
+    sp = spans(len(X), outcome_pos, labelled, cfg, dates)
     if sp is None:
         return {'status': 'insufficient_history', 'reason': '최소 학습 표본(%d) + 평가 구간 확보 불가' % cfg.min_train}
     dev_start, dev_end, hold_start, hold_end = sp
-    dates = [d.date().isoformat() for d in X.index]
     chosen = {}
     # 1) development: choose hyper-parameters and calibration method by mean log loss
     for name, grid in models.GRID.items():
@@ -222,21 +262,17 @@ def evaluate(ds, cfg, log=lambda *a: None):
         preds[name] = (idx, p, yt, fold_ids)
     if 'class_frequency' not in results:
         return {'status': 'insufficient_history', 'reason': '기준 모델 holdout 예측 없음'}
-    base_idx, base_p, base_y, _ = preds['class_frequency']
-    base_loss = pd_align(base_idx, per_sample_logloss(base_p, base_y))
-    block = max(cfg.horizon, 10)
+    # Strongest baseline on the holdout: comparing only against the base rate would let a model that is
+    # worse than a trivial momentum rule pass. Picking the best baseline ex post only makes the test harder.
     for name, r in results.items():
-        idx, p, yt, _ = preds[name]
-        common = np.intersect1d(idx, base_idx)
-        mine = pd_align(idx, per_sample_logloss(p, yt))
-        a = np.array([base_loss[i] for i in common])
-        b = np.array([mine[i] for i in common])
-        mean, lo, hi = block_bootstrap_diff(a, b, block, cfg.bootstrap, cfg.seed)
-        r['vs_class_frequency'] = {
-            'log_loss_improvement': mean, 'ci90_low': lo, 'ci90_high': hi,
-            'brier_skill': 1 - r['brier'] / results['class_frequency']['brier'],
-            'balanced_accuracy_delta': r['balanced_accuracy'] - results['class_frequency']['balanced_accuracy']}
-        r['effective_n'] = int(r['n'] // cfg.horizon)
+        refs = [b for b in BASELINES + (('logistic_regression',) if r['family'] == 'ml' else ())
+                if b != name and b in results] or ['class_frequency']
+        best_base = min(refs, key=lambda b: results[b]['log_loss'])
+        r['vs_class_frequency'] = _compare(preds['class_frequency'], preds[name], results, 'class_frequency', r, cfg)
+        r['vs_best_baseline'] = _compare(preds[best_base], preds[name], results, best_base, r, cfg)
+        r['vs_best_baseline']['baseline'] = best_base
+        r['effective_n'] = r['vs_best_baseline'].pop('effective_n')
+        r['vs_class_frequency'].pop('effective_n')
         r['validation'] = gate(r, name, cfg)
     primary = min((n for n in chosen if n != 'class_frequency'), key=lambda n: chosen[n]['dev_log_loss'],
                   default='class_frequency')
@@ -252,18 +288,46 @@ def pd_align(idx, values):
     return dict(zip(idx.tolist(), values.tolist()))
 
 
+def _compare(base, mine, results, base_name, r, cfg):
+    """Paired block-bootstrap comparison on the common holdout dates (positive = `mine` is better)."""
+    (b_idx, b_p, b_y, _), (m_idx, m_p, m_y, _) = base, mine
+    common = np.intersect1d(m_idx, b_idx)
+    bl, ml = pd_align(b_idx, per_sample_logloss(b_p, b_y)), pd_align(m_idx, per_sample_logloss(m_p, m_y))
+    bb, mb = pd_align(b_idx, per_sample_brier(b_p, b_y)), pd_align(m_idx, per_sample_brier(m_p, m_y))
+    d_ll = np.array([bl[i] - ml[i] for i in common])
+    d_br = np.array([bb[i] - mb[i] for i in common])
+    block = bootstrap_block(len(common), cfg.horizon)
+    mean, lo, hi = block_bootstrap_diff([bl[i] for i in common], [ml[i] for i in common], block, cfg.bootstrap,
+                                        cfg.seed)
+    b_mean, b_lo, _ = block_bootstrap_diff([bb[i] for i in common], [mb[i] for i in common], block,
+                                           cfg.bootstrap, cfg.seed + 1)
+    return {'log_loss_improvement': mean, 'ci90_low': lo, 'ci90_high': hi, 'block': block,
+            'brier_improvement': b_mean, 'brier_ci90_low': b_lo,
+            'brier_skill': 1 - r['brier'] / results[base_name]['brier'],
+            'balanced_accuracy_delta': r['balanced_accuracy'] - results[base_name]['balanced_accuracy'],
+            'effective_n': effective_n(d_ll if len(d_ll) else d_br, cfg.horizon)}
+
+
 def gate(r, name, cfg):
     """Fixed, a-priori validation criteria. Anything else is shown as NOT VALIDATED."""
     reasons = []
     if name == 'class_frequency':
         return {'status': 'baseline', 'reasons': ['기준 모델']}
     if r['effective_n'] < cfg.min_effective_holdout:
-        reasons.append('비중첩 holdout 표본 %d < %d' % (r['effective_n'], cfg.min_effective_holdout))
+        reasons.append('유효 holdout 표본 %d < %d' % (r['effective_n'], cfg.min_effective_holdout))
+    checks = [('vs_class_frequency', '기준 모델(class_frequency)')]
+    if (r.get('vs_best_baseline') or {}).get('baseline', 'class_frequency') != 'class_frequency':
+        checks.append(('vs_best_baseline', '최강 비교 모델(%s)' % r['vs_best_baseline']['baseline']))
+    for key, label in checks:
+        v = r[key]
+        if v['ci90_low'] is None or v['ci90_low'] <= 0:
+            reasons.append('%s 대비 log loss 개선의 90%% 하한 ≤ 0' % label)
+        if v.get('brier_ci90_low') is None or v['brier_ci90_low'] <= 0:
+            reasons.append('%s 대비 Brier 개선의 90%% 하한 ≤ 0' % label)
     v = r['vs_class_frequency']
-    if v['ci90_low'] is None or v['ci90_low'] <= 0:
-        reasons.append('기준 모델 대비 log loss 개선의 90%% 하한 ≤ 0')
-    if v['brier_skill'] <= 0:
-        reasons.append('Brier skill ≤ 0')
+    if r.get('dev_log_loss') and r['log_loss'] > r['dev_log_loss'] * (1 + cfg.max_dev_holdout_gap):
+        reasons.append('holdout log loss %.4f가 개발 구간 %.4f보다 %.0f%% 넘게 나쁨 (과적합 의심)'
+                       % (r['log_loss'], r['dev_log_loss'], cfg.max_dev_holdout_gap * 100))
     if v['balanced_accuracy_delta'] < cfg.min_bal_acc_gain:
         reasons.append('균형 정확도 개선 %+.1f%%p < %.0f%%p (방향 정보 부족)'
                        % (v['balanced_accuracy_delta'] * 100, cfg.min_bal_acc_gain * 100))

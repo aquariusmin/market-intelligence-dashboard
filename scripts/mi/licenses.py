@@ -2,9 +2,12 @@
 
 Values: 'allowed' | 'conditional' | 'not_allowed' | 'unclear' | 'unverified'.
 Only 'allowed' passes the ML gate. Unknown permissions are never assumed to be granted.
+'conditional' storage passes only when the entry lists the `conditions` this local, personal,
+non-redistributing dashboard satisfies by design; a conditional entry without them is refused.
 Verified 2026-10-15 by reading each provider's terms page (summary in README "Data Sources").
 """
 import json
+import sys
 
 from . import paths
 
@@ -24,6 +27,8 @@ SOURCES = {
                         terms_url='https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO002.jsp',
                         collection='allowed', local_storage='conditional', ml_training='unclear',
                         redistribution='not_allowed',
+                        conditions=['비상업적 개인 이용 (로컬 대시보드)', '제3자 제공·재배포 없음 (data/ gitignore)',
+                                    '계약 종료 시 이용 중단 (사용자 책임)'],
                         notes='비상업적 이용만 허용(제6조②), 제3자 제공 금지(제11조②), 계약 종료 후 이용 불가(제11조③). '
                               'ML 사용 명시 없음 → 학습 불허로 취급.'),
     'fed_h15': dict(provider='Federal Reserve Board (DDP)', dataset='H.15 Treasury constant maturity yields',
@@ -48,17 +53,20 @@ SOURCES = {
                           local_storage='allowed', ml_training='allowed', redistribution='allowed',
                           notes='제3자 자료 제외 공공 도메인.'),
     'sec_press_rss': dict(provider='U.S. SEC', dataset='Press release RSS (title/link/date)',
-                          terms_url='https://www.sec.gov/privacy', collection='conditional', local_storage='allowed',
-                          ml_training='allowed', redistribution='allowed',
-                          notes='User-Agent 선언, 초당 10회 이하 (fair access).'),
+                          terms_url='https://www.sec.gov/about/developer-resources', collection='conditional',
+                          local_storage='allowed', ml_training='allowed', redistribution='allowed',
+                          notes='Fair access: 초당 10회 이하, 미분류 봇 금지 → User-Agent 선언. '
+                                '개인정보·보안 정책: https://www.sec.gov/privacy.htm#security'),
     'gdelt_doc': dict(provider='GDELT Project', dataset='DOC 2.0 API article list (title/URL/time)',
                       terms_url='https://www.gdeltproject.org/about.html', collection='allowed', local_storage='allowed',
-                      ml_training='allowed', redistribution='conditional',
+                      ml_training='conditional', redistribution='conditional',
                       notes='GDELT 자체 데이터는 무제한 이용·인용 필요. 기사 제목·URL의 권리는 각 언론사 → 원문 미저장. '
+                            '제목 텍스트의 ML 사용은 언론사 권리 미확인 → conditional(학습 불허). '
                             '5초당 1회 제한.'),
     'fomc_calendar': dict(provider='Federal Reserve Board', dataset='FOMC meeting calendar',
                           terms_url='https://www.federalreserve.gov/disclaimer.htm', collection='allowed',
-                          local_storage='allowed', ml_training='allowed', redistribution='allowed', notes=''),
+                          local_storage='allowed', ml_training='allowed', redistribution='allowed',
+                          notes='Board 웹사이트 공개 일정 · "public domain" (disclaimer.htm) · 출처 표기.'),
 }
 for _s in SOURCES.values():
     _s.setdefault('verified_on', VERIFIED)
@@ -79,7 +87,11 @@ def licensed_manifest(path=None):
     path = path or paths.LICENSED / 'manifest.json'
     if not path.exists():
         return {}
-    data = json.loads(path.read_text(encoding='utf-8'))
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:  # a broken manifest grants nothing but must not stop the pipeline
+        print('licensed manifest unreadable (%s): no licensed sources used' % exc, file=sys.stderr)
+        return {}
     out = {}
     for market, entry in (data.get('markets') or {}).items():
         missing = [f for f in LICENSED_FIELDS if not str(entry.get(f, '')).strip()]
@@ -105,14 +117,21 @@ def ml_allowed(source_id, manifest=None):
         return False, '%s: manifest 필수 항목 누락 (%s)' % (source_id, ', '.join(s['manifest_errors']))
     if s.get('ml_training') != 'allowed':
         return False, '%s: ML 학습 권한 %s' % (source_id, s.get('ml_training'))
-    if s.get('local_storage') not in ('allowed', 'conditional'):
+    if not _storage_ok(s):
         return False, '%s: 로컬 저장 권한 %s' % (source_id, s.get('local_storage'))
     return True, ''
 
 
+def _storage_ok(s):
+    if s.get('local_storage') == 'allowed':
+        return True
+    # user-supplied manifests record the licence the user holds; built-in conditional entries must list conditions
+    return s.get('local_storage') == 'conditional' and (bool(s.get('conditions')) or s.get('collection') == 'user_supplied')
+
+
 def storage_allowed(source_id, manifest=None):
     s = source(source_id, manifest)
-    return bool(s) and s.get('local_storage') in ('allowed', 'conditional')
+    return bool(s) and _storage_ok(s)
 
 
 def registry(manifest=None):

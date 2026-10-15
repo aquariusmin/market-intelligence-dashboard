@@ -54,7 +54,7 @@ function realSpark(m) {
 function realCards() {
   return `<div class="grid markets">${Object.entries(markets).map(([key,demo])=>{
     const m = realData?.markets[key], [label,color] = trend(m);
-    return `<button class="card market ${key===state.market?'active':''}" data-market="${key}" aria-pressed="${key===state.market}"><div class="row"><h2>${demo.name}</h2><span class="label">${esc(m?.symbol || demo.ticker)}</span></div><div class="index">${number(m?.value)}</div><div class="tiny ${direction(m?.change_pct)}" style="margin-top:6px">${Number.isFinite(m?.change_pct)?(m.change_pct>=0?'▲ ':'▼ '):''}${signed(m?.change_pct)} <span class="muted">전 관측 종가 대비</span></div>${realSpark(m)}<div class="row"><span class="tiny muted">${esc(m?.as_of || '기준일 없음')}</span><span class="badge ${color}">${label}</span></div><div class="sub" style="margin-top:10px">${esc(availability(m))}</div></button>`;
+    return `<button class="card market ${key===state.market?'active':''}" data-market="${key}" aria-pressed="${key===state.market}"><div class="row"><h2>${demo.name}</h2><span class="label">${esc(m?.symbol || '—')}</span></div><div class="index">${number(m?.value)}</div><div class="tiny ${direction(m?.change_pct)}" style="margin-top:6px">${Number.isFinite(m?.change_pct)?(m.change_pct>=0?'▲ ':'▼ '):''}${signed(m?.change_pct)} <span class="muted">전 관측 종가 대비</span></div>${realSpark(m)}<div class="row"><span class="tiny muted">${esc(m?.as_of || '기준일 없음')}</span><span class="badge ${color}">${label}</span></div><div class="sub" style="margin-top:10px">${esc(availability(m))}</div></button>`;
   }).join('')}</div>`;
 }
 function realChart() {

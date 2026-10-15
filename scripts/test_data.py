@@ -72,6 +72,19 @@ class IndicatorsTest(unittest.TestCase):
             rows=providers.krx(providers.MARKETS['ks'],previous,date(2026,1,5))
             self.assertEqual(rows[-1]['close'],2600.5)
 
+    def test_krx_placeholder_close_and_midloop_failure(self):
+        blank={'OutBlock_1':[{'IDX_NM':'코스피','BAS_DD':'20260106','CLSPRC_IDX':'-'}]}
+        previous=[{'date':'2026-01-05','close':2600.0}]
+        with patch.dict('os.environ',{'KRX_API_KEY':'offline-test'}):
+            with patch.object(providers,'request_text',side_effect=lambda url,headers,json_body: json.dumps(blank if json_body['basDd']=='20260106' else {'OutBlock_1':[]})):
+                self.assertEqual(providers.krx(providers.MARKETS['ks'],previous,date(2026,1,6)),previous)
+            def flaky(url,headers,json_body):
+                if json_body['basDd']=='20260106': raise RuntimeError('offline network failure')
+                return json.dumps({'OutBlock_1':[]})
+            with patch.object(providers,'request_text',side_effect=flaky):
+                with self.assertRaisesRegex(RuntimeError,'2026-01-06'): providers.krx(providers.MARKETS['ks'],previous,date(2026,1,6))
+        self.assertEqual(previous,[{'date':'2026-01-05','close':2600.0}])  # caller's last good rows untouched
+
     def test_http_diagnostics_and_key_privacy(self):
         from subprocess import CompletedProcess
         marker = '\n__MARKET_HTTP_STATUS__:'
@@ -89,6 +102,8 @@ class IndicatorsTest(unittest.TestCase):
             self.assertIn('POST',args)
             self.assertNotIn('secret-test-key',' '.join(args))
             self.assertNotIn('--location',args)
+            self.assertEqual(args[args.index('--proto')+1],'=https')
+            self.assertEqual(args[args.index('--proto-redir')+1],'=https')
             self.assertIn('AUTH_KEY: secret-test-key',run.call_args.kwargs['input'])
 
     def test_timeout_retry_and_auth_no_retry(self):

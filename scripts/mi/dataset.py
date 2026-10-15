@@ -76,7 +76,7 @@ def macro_features(macro_rows, market, index):
     return out, src
 
 
-def cross_features(market, index, own_close, others):
+def cross_features(market, index, own_close, others, manifest=None):
     """others: {market2: (dates, closes, source_id)}. As-of join on the other exchange's close time."""
     decisions = timing.decision_times(market, [d.date() for d in index])
     own_ret = np.log(own_close).diff()
@@ -87,7 +87,7 @@ def cross_features(market, index, own_close, others):
         d2 = [pd.Timestamp(d).date() for d in dates]
         c2 = pd.Series(np.asarray(closes, float), index=pd.DatetimeIndex(pd.to_datetime(dates)))
         lr = np.log(c2)
-        avail = timing.price_available_at(m2, d2)
+        avail = timing.price_available_at(m2, d2, sid, manifest)
         feats = {'%s_ret1' % m2: (lr - lr.shift(1)) * 100, '%s_ret5' % m2: (lr - lr.shift(5)) * 100,
                  '%s_mom20' % m2: (c2 / c2.shift(20) - 1) * 100}
         for name, s in feats.items():
@@ -139,7 +139,7 @@ def build(market, series_by_market, macro_rows, horizon, manifest=None):
             others[m2] = ([r['date'] for r in s2['rows']], [r['close'] for r in s2['rows']], s2['source_id'])
         else:
             dropped.append({'feature': '%s_*' % m2, 'reason': why})
-    cx, csrc = cross_features(market, df.index, df['close'], others)
+    cx, csrc = cross_features(market, df.index, df['close'], others, manifest)
     for col in cx.columns:
         X[col], sources[col] = cx[col], csrc[col]
     y, fwd, thr = labels(df['close'], horizon)
