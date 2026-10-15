@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.tmp
+
+# Local provider data and supplied API specifications (not licensed for public redistribution)
+data/markets.json
+Spec.docx
+Spec-2.docx
