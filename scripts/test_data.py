@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 import collect_data as collector
 import providers
+import collect_macro as macro
 
 
 class IndicatorsTest(unittest.TestCase):
@@ -171,6 +172,74 @@ class IndicatorsTest(unittest.TestCase):
             path.write_text('{broken')
             with self.assertRaises(json.JSONDecodeError): collector.collect(path,{'fred':ok,'krx':ok},today)
             self.assertEqual(path.read_text(),'{broken')
+
+
+class V03Test(unittest.TestCase):
+    def test_extended_metrics_and_year_boundary(self):
+        today=date(2026,10,15)
+        rows=[{'date':(today-timedelta(days=399-i)).isoformat(),'close':100+i} for i in range(400)]
+        m=collector.indicators(rows)
+        self.assertAlmostEqual(m['return5'],(499/494-1)*100)
+        self.assertAlmostEqual(m['return60'],(499/439-1)*100)
+        self.assertEqual(m['drawdown52w'],0)
+        self.assertEqual(m['high52w'],499)
+        self.assertAlmostEqual(m['distance_sma20'],(499/m['sma20']-1)*100)
+        self.assertEqual(collector.market_regime(499,m)['code'],'uptrend')
+        self.assertIsNone(collector.indicators(rows[-100:])['drawdown52w'])
+        # An old extreme outside 52 weeks must not affect the current window high.
+        rows[0]['close']=99999
+        self.assertEqual(collector.indicators(rows)['high52w'],499)
+        rows[-1]['close']=400
+        self.assertAlmostEqual(collector.indicators(rows)['drawdown52w'],(400/498-1)*100)
+
+    def test_regime_down_mixed_and_insufficient(self):
+        m={'sma20':110,'sma50':120,'sma200':130,'return20':-5,'realized_volatility20':26}
+        self.assertEqual(collector.market_regime(100,m)['code'],'downtrend')
+        self.assertEqual(collector.market_regime(100,m)['volatility'],'높음')
+        self.assertEqual(collector.market_regime(125,m)['code'],'mixed')
+        self.assertEqual(collector.market_regime(100,{})['code'],'unavailable')
+
+    def test_macro_signed_values_duplicates_and_missing(self):
+        config=macro.MACRO['yield_spread']
+        rows=[{'date':'2026-10-13','close':-0.1},{'date':'2026-10-14','close':0}]
+        self.assertEqual(macro.validate_macro_rows(rows,config,date(2026,10,15)),rows)
+        with self.assertRaises(ValueError):macro.validate_macro_rows(rows+rows[-1:],config,date(2026,10,15))
+        with self.assertRaises(ValueError):macro.validate_macro_rows([{'date':'2026-10-14','close':float('inf')}],config,date(2026,10,15))
+        with self.assertRaises(ValueError):macro.validate_macro_rows([{'date':'2026-10-14','close':-1}],macro.MACRO['vix'],date(2026,10,15))
+
+    def test_macro_last_good_and_release_time_separation(self):
+        today=date(2026,10,15)
+        def ok(*a):return [{'date':'2026-10-13','close':3},{'date':'2026-10-14','close':4}]
+        def fail(*a):raise RuntimeError('offline')
+        with tempfile.TemporaryDirectory() as directory,contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+            path=Path(directory)/'macro.json'
+            self.assertEqual(macro.collect_macro(path,{'fred':ok,'ecos':ok},today),1) # DXY deliberately absent
+            before=json.loads(path.read_text())
+            m=before['indicators']['us2y']
+            self.assertIsNone(m['publication_date'])
+            self.assertIsNone(m['source_updated_at'])
+            self.assertNotEqual(m['observation_date'],m['updated_at'])
+            self.assertFalse(m['usage']['ml_training_allowed'])
+            self.assertEqual(macro.collect_macro(path,{'fred':fail,'ecos':fail},today),10)
+            after=json.loads(path.read_text())
+            for field in ('value','history','observation_date','updated_at'):
+                self.assertEqual(before['indicators']['us2y'][field],after['indicators']['us2y'][field])
+            self.assertEqual(after['indicators']['us2y']['status'],'stale')
+            self.assertEqual(after['indicators']['dxy']['status'],'unavailable')
+            path.write_text('{broken')
+            with self.assertRaises(json.JSONDecodeError):macro.collect_macro(path,{'fred':ok,'ecos':ok},today)
+            self.assertEqual(path.read_text(),'{broken')
+
+    def test_ecos_parser_and_key_not_in_process_arguments(self):
+        config=macro.MACRO['bok_rate']
+        reply={'StatisticSearch':{'list_total_count':1,'row':[{'STAT_CODE':'722Y001','ITEM_CODE1':'0101000','TIME':'20261014','DATA_VALUE':'2.50'}]}}
+        with patch.dict('os.environ',{'ECOS_API_KEY':'test-ecos-secret'}),patch.object(macro,'request_text',return_value=json.dumps(reply)):
+            self.assertEqual(macro.ecos(config,[],date(2026,10,15))[0]['close'],2.5)
+        from subprocess import CompletedProcess
+        with patch.object(providers.subprocess,'run',return_value=CompletedProcess([],0,'{}\n__MARKET_HTTP_STATUS__:200','')) as run:
+            providers.request_text('https://ecos.bok.or.kr/api/test-ecos-secret',{'Accept':'application/json'})
+            self.assertNotIn('test-ecos-secret',' '.join(run.call_args.args[0]))
+            self.assertIn('test-ecos-secret',run.call_args.kwargs['input'])
 
 
 if __name__=='__main__': unittest.main()

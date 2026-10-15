@@ -13,7 +13,7 @@ data/markets.json
 Spec.docx
 Spec-2.docx
 
-# v1.0 engine outputs (derived from provider data; local only) and environments
+# engine outputs (derived from provider data; local only) and environments
 data/
 .venv/
 # Playwright CLI output (may contain credentials)
@@ -22,3 +22,5 @@ data/
 .playwright/
 .claude/*.lock
 .claude/settings.local.json
+# Display-only macro data: never commit or use as ML training input
+data/reference_only/

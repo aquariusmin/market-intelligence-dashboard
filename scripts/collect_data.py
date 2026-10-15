@@ -8,7 +8,7 @@ from pathlib import Path
 import statistics
 import sys
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from providers import MARKETS, PROVIDERS, krx_day
 
@@ -41,11 +41,34 @@ def indicators(rows):
         for m in macds[9:]:
             signal = m*.2 + signal*.8
     logs = [math.log(b/a) for a, b in zip(values, values[1:])]
-    return {'sma20': sma(20), 'sma50': sma(50), 'sma200': sma(200), 'rsi14': rsi,
+    result = {'sma20': sma(20), 'sma50': sma(50), 'sma200': sma(200), 'rsi14': rsi,
             'macd': macds[-1] if macds else None, 'macd_signal': signal,
             'macd_histogram': macds[-1]-signal if signal is not None else None,
             'return20': (values[-1]/values[-21]-1)*100 if len(values) >= 21 else None,
             'realized_volatility20': statistics.stdev(logs[-20:])*math.sqrt(252)*100 if len(logs) >= 20 else None}
+
+    for n in (5, 60):
+        result['return'+str(n)] = (values[-1]/values[-n-1]-1)*100 if len(values)>n else None
+    result['realized_volatility60'] = statistics.stdev(logs[-60:])*math.sqrt(252)*100 if len(logs)>=60 else None
+    cutoff = date.fromisoformat(rows[-1]['date']) - timedelta(weeks=52)
+    high = max(r['close'] for r in rows if date.fromisoformat(r['date'])>=cutoff) if date.fromisoformat(rows[0]['date'])<=cutoff else None
+    result['high52w'] = high
+    result['drawdown52w'] = (values[-1]/high-1)*100 if high else None
+    for n in (20, 50, 200):
+        result['distance_sma'+str(n)] = (values[-1]/result['sma'+str(n)]-1)*100 if result['sma'+str(n)] else None
+    return result
+
+
+def market_regime(value, metrics):
+    required = ['sma20', 'sma50', 'sma200', 'return20', 'realized_volatility20']
+    if any(metrics.get(k) is None for k in required):
+        return {'code':'unavailable', 'label':'이력 부족', 'rules_version':'1'}
+    a,b,c = (metrics['sma'+str(n)] for n in (20,50,200))
+    code = 'uptrend' if value>=a>=b>=c and metrics['return20']>0 else (
+        'downtrend' if value<a<b<c and metrics['return20']<0 else 'mixed')
+    vol = metrics['realized_volatility20']
+    return {'code':code, 'label':{'uptrend':'상승 추세','downtrend':'하락 추세','mixed':'혼조 / 횡보'}[code],
+            'volatility':'높음' if vol>=25 else ('낮음' if vol<20 else '보통'), 'rules_version':'1'}
 
 
 def validate_rows(rows, today):
@@ -108,10 +131,13 @@ def collect(output, providers=None, today=None, selected=None):
             # Reject very old responses as a successful refresh; existing old snapshots stay visible.
             if (today - date.fromisoformat(rows[-1]['date'])).days > 10:
                 raise ValueError('제공자 최근 관측값이 10일 이상 지연됨')
+            metrics = indicators(rows)
             entry = dict(config, status='ok', error=None, last_attempt_at=now,
                          updated_at=now, as_of=rows[-1]['date'], history=rows,
                          value=rows[-1]['close'], change_pct=(rows[-1]['close']/rows[-2]['close']-1)*100,
-                         indicators=indicators(rows))
+                         indicators=metrics,
+                         regime=market_regime(rows[-1]['close'], metrics),
+                         usage={'scope':'local_reference_only','ml_training_allowed':False})
             successes += 1
             print('%s: OK · %s · %d observations' % (config['name'], entry['as_of'], len(rows)))
         except Exception as exc:
@@ -134,10 +160,25 @@ if __name__ == '__main__':
                         help='두 KRX API를 날짜별 1회씩 진단. JSON 파일을 변경하지 않음')
     parser.add_argument('--markets', nargs='+', choices=list(MARKETS),
                         help='수집할 시장만 선택: sp nq ks kq. 나머지는 기존 데이터 유지')
+    parser.add_argument('--recalculate', action='store_true', help='네트워크 없이 기존 정상 이력의 v0.3 분석 갱신')
     args = parser.parse_args()
     if args.check_krx and args.markets and any(k not in ('ks', 'kq') for k in args.markets):
         parser.error('--check-krx에는 --markets ks kq만 지정할 수 있습니다')
     try:
+        if args.recalculate:
+            data = json.loads(args.output.read_text(encoding='utf-8'))
+            if data.get('schema_version') != 1 or not isinstance(data.get('markets'), dict):
+                raise ValueError('기존 JSON 스키마 오류')
+            for market in data['markets'].values():
+                if market.get('history'):
+                    rows = validate_rows(market['history'], date.today())
+                    market['indicators'] = indicators(rows)
+                    market['regime'] = market_regime(market['value'], market['indicators'])
+                    market['usage'] = {'scope':'local_reference_only', 'ml_training_allowed':False}
+            data['analytics_computed_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            atomic_json(args.output, data)
+            print('v0.3 분석 갱신 완료 · 원본 관측일/수집시각 유지')
+            sys.exit(0)
         if args.check_krx:
             failures = 0
             for key in (args.markets or ('ks', 'kq')):
