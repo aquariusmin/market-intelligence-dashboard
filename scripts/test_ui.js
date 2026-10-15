@@ -7,15 +7,17 @@ const snapshot={schema_version:1,markets:Object.fromEntries(Object.entries(names
 const macroKeys=['vix','us2y','us10y','yield_spread','hy_spread','dxy','broad_dollar','usdkrw','bok_rate','kr3y'];
 const macro={schema_version:1,usage_scope:'local_reference_only',ml_training_allowed:false,indicators:Object.fromEntries(macroKeys.map(k=>[k,{name:k,status:k==='dxy'?'unavailable':'ok',history:k==='dxy'?[]:[{date:'2026-10-13',close:3},{date:'2026-10-14',close:4}],value:k==='dxy'?null:4,observation_date:k==='dxy'?null:'2026-10-14',publication_date:null,updated_at:'2026-10-15T00:00:00Z'}]))};
 const nodes=Object.fromEntries(['nav','#app','.topbar','.sidefoot','.footer'].map(k=>[k,{innerHTML:''}])),handlers={};
-const ctx={Date,console,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},fetch:async u=>({ok:true,json:async()=>JSON.parse(JSON.stringify(u.includes('macro')?macro:snapshot))}),document:{querySelector:s=>nodes[s]||null,querySelectorAll:()=>[],addEventListener:(t,f)=>(handlers[t]??=[]).push(f)}};
+const ctx={Date,console,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},fetch:async u=>u.includes('data/dashboard/')?{ok:false,status:404}:({ok:true,json:async()=>JSON.parse(JSON.stringify(u.includes('macro')?macro:snapshot))}),document:{querySelector:s=>nodes[s]||null,querySelectorAll:()=>[],addEventListener:(t,f)=>(handlers[t]??=[]).push(f)}};
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(path.join(root,'index.html'),'utf8').match(/<script>([\s\S]*?)<\/script>/)[1],ctx);
-vm.runInContext(fs.readFileSync(path.join(root,'real-data.js'),'utf8'),ctx);
+vm.runInContext(fs.readFileSync(path.join(root,'app.js'),'utf8'),ctx);
 (async()=>{
  await new Promise(r=>setImmediate(r));
- assert(nodes['#app'].innerHTML.includes('Global Risk Indicators'));
  assert(nodes['#app'].innerHTML.includes('Major Market Changes'));
+ vm.runInContext("state.tab='Indicators';render()",ctx);
+ assert(nodes['#app'].innerHTML.includes('Global Risk Indicators'));
  assert(nodes['#app'].innerHTML.includes('실제 공개 시각'));
+ vm.runInContext("state.tab='Overview';render()",ctx);
  const lengths=[];
  for(const period of ['1M','3M','6M','1Y']){
   vm.runInContext(`state.chartPeriod='${period}';render()`,ctx);
@@ -23,6 +25,7 @@ vm.runInContext(fs.readFileSync(path.join(root,'real-data.js'),'utf8'),ctx);
   lengths.push(rows.length);
   assert.equal(rows.at(-1).ma[200],449.5); // Uses pre-window warmup, including in 1M.
   assert(nodes['#app'].innerHTML.includes('SMA 200'));
+  assert(nodes['#app'].innerHTML.includes('data-chart-period="ALL"'));
  }
  assert.deepEqual(lengths,[32,93,185,366]);
  const send=(type,target)=>handlers[type].forEach(f=>f({target}));
