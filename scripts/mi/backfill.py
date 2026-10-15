@@ -18,9 +18,29 @@ SOURCE_ID = 'krx_openapi'
 DAILY_LIMIT = 10000          # KRX terms, per key per day
 DAILY_BUDGET = 8000          # this tool's share; the rest stays free for daily ingest and manual checks
 INTERVAL_S = 0.2             # pause between calls
+RETRY_WAITS = (5, 30)        # transient answers (non-JSON page, 5xx, timeout): wait and ask again
 RECHECK_DAYS = 7             # a recent "no data" answer may be a not-yet-published day: ask again
 KST = ZoneInfo('Asia/Seoul')
 CODES = {'ks': 'KOSPI', 'kq': 'KOSDAQ'}
+
+
+def _transient(exc):
+    text = str(exc)
+    return not any(k in text for k in ('HTTP 401', 'HTTP 403', 'KRX_API_KEY', '인증키', 'OutBlock', '기준일 불일치',
+                                         '대상 대표 지수'))
+
+
+def _fetch_with_retry(fetch, cfg, day, sleep):
+    """-> (row, calls_made). Auth / format errors raise at once; transient ones are retried."""
+    for i, wait in enumerate((0,) + RETRY_WAITS):
+        if wait:
+            sleep(wait)
+        try:
+            return fetch(cfg, day), i + 1
+        except Exception as exc:
+            if i == len(RETRY_WAITS) or not _transient(exc):
+                exc.calls_made = i + 1
+                raise
 
 
 def kst_today(now=None):
@@ -73,11 +93,15 @@ def run(conn, start, markets=('ks', 'kq'), end=None, fetch=None, sleep=time.slee
             if report['calls']:
                 sleep(INTERVAL_S)
             try:
-                row = fetch(CFG[market], d)
-            except Exception as exc:   # auth / network / format: stop, keep progress
+                row, made = _fetch_with_retry(fetch, CFG[market], d, sleep)
+            except Exception as exc:   # auth / format, or still failing after retries: stop, keep progress
+                for _ in range(getattr(exc, 'calls_made', 1)):
+                    report['calls'] += 1
+                    _count_call(conn, today)
                 report['stopped'] = '%s %s: %s' % (CODES[market], d.isoformat(), exc)
                 break
-            finally:
+            report['retried'] = report.get('retried', 0) + made - 1
+            for _ in range(made):
                 report['calls'] += 1
                 _count_call(conn, today)
             status = 'trading' if row else 'no_data'

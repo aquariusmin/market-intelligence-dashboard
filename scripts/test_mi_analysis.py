@@ -676,6 +676,28 @@ class BackfillTest(unittest.TestCase):
             self.assertEqual(rep['calls'], 2)                              # 5 used earlier today
             self.assertEqual(backfill.calls_today(conn, backfill.kst_today(self.NOW)), 7)
 
+    def test_transient_answer_is_retried_but_auth_error_is_not(self):
+        waits, flaky = [], {'n': 0}
+
+        def fetch(cfg, d):
+            self.calls.append(d)
+            if d == date(2026, 10, 1) and flaky['n'] < 2:
+                flaky['n'] += 1
+                raise ValueError('KRX가 JSON 대신 다른 응답을 반환 · 인증/네트워크/서버 확인')
+            return {'date': d.isoformat(), 'close': 2500.0}
+        with store.connect(self.db) as conn:
+            rep = backfill.run(conn, date(2026, 9, 28), ('ks',), fetch=fetch, sleep=waits.append, now=self.NOW,
+                               log=lambda *a: None)
+            self.assertIsNone(rep['stopped'])
+            self.assertEqual(rep['retried'], 2)
+            self.assertIn(backfill.RETRY_WAITS[0], waits)
+            self.assertEqual(rep['calls'], backfill.calls_today(conn, backfill.kst_today(self.NOW)))
+        self.calls.clear()
+        with store.connect(Path(self.tmp.name) / 'b.sqlite') as conn:
+            rep = self.run_(conn, fetch=self.fetch(fail_on=date(2026, 9, 28)))
+            self.assertEqual(len(self.calls), 1)                              # HTTP 401: no retry
+            self.assertEqual(rep['calls'], 1)
+
     def test_provider_error_stops_and_keeps_progress(self):
         with store.connect(self.db) as conn:
             rep = self.run_(conn, markets=('ks', 'kq'), fetch=self.fetch(fail_on=date(2026, 10, 1)))

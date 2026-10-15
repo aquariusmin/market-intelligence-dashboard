@@ -5,7 +5,7 @@ Live forecasts are append-only: a new model version adds rows, it never overwrit
 """
 import hashlib
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import numpy as np
 
@@ -14,6 +14,24 @@ from .macro import SERIES as MACRO
 
 LABELS = dataset.CLASSES
 LIVE_WARN_MIN_N = 30
+MAX_INPUT_AGE_DAYS = 7   # a live forecast needs a recent close; older inputs mean collection is behind
+OPENS = {'sp': (timing.ET, time(9, 30)), 'nq': (timing.ET, time(9, 30)),
+         'ks': (timing.KST, time(9, 0)), 'kq': (timing.KST, time(9, 0))}
+
+
+def first_outcome_open(market, cutoff):
+    """Open of the earliest session that could follow `cutoff` (next weekday; holidays only make it later)."""
+    tz, t = OPENS[market]
+    d = cutoff + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return datetime.combine(d, t, tz).astimezone(timezone.utc)
+
+
+def is_timely(row):
+    """A live forecast counts only if it was recorded before the next session opened."""
+    created = datetime.fromisoformat(row['created_at'])
+    return created < first_outcome_open(row['market'], date.fromisoformat(row['input_cutoff']))
 
 
 def load_inputs(conn, manifest=None, transient_macro=None):
@@ -124,7 +142,7 @@ def _expected_outcome(cutoff, horizon):
     return d
 
 
-def forecast(conn, perf, markets=None, manifest=None, log=print, transient_macro=None):
+def forecast(conn, perf, markets=None, manifest=None, log=print, transient_macro=None, now=None):
     """Fit the development-chosen primary model on all labelled data and forecast the latest row."""
     series, macro_rows, manifest = load_inputs(conn, manifest, transient_macro)
     out = {'generated_at': store.now_utc(), 'markets': {}}
@@ -136,11 +154,12 @@ def forecast(conn, perf, markets=None, manifest=None, log=print, transient_macro
                 out['markets'][m][str(h)] = {'market': m, 'horizon': h, 'status': 'unavailable',
                                              'reason': p.get('reason', '검증된 학습 결과 없음 (train 먼저 실행)')}
                 continue
-            out['markets'][m][str(h)] = _forecast_one(conn, m, h, p, series, macro_rows, manifest, log)
+            out['markets'][m][str(h)] = _forecast_one(conn, m, h, p, series, macro_rows, manifest, log,
+                                                      now or datetime.now(timezone.utc))
     return out
 
 
-def _forecast_one(conn, m, h, perf_entry, series, macro_rows, manifest, log):
+def _forecast_one(conn, m, h, perf_entry, series, macro_rows, manifest, log, now):
     ds = dataset.build(m, series, macro_rows, h, manifest)
     name = perf_entry['primary_model']
     chosen = perf_entry['models'][name]
@@ -156,6 +175,10 @@ def _forecast_one(conn, m, h, perf_entry, series, macro_rows, manifest, log):
     if len(train) < cfg.min_train:
         return {'market': m, 'horizon': h, 'status': 'unavailable',
                 'reason': '학습 표본 %d < 최소 %d' % (len(train), cfg.min_train)}
+    age = (now.astimezone(timing.KST).date() - X.index[-1].date()).days
+    if age > MAX_INPUT_AGE_DAYS:
+        return {'market': m, 'horizon': h, 'status': 'unavailable',
+                'reason': '입력 데이터가 오래됨 (마지막 종가 %s, %d일 전) · 수집·백필 확인' % (X.index[-1].date(), age)}
     cut = train[int(len(train) * (1 - cfg.calib_frac))]
     cal = train[train >= cut]
     fit = train[(train < cut) & (ds['outcome_pos'][train] + cfg.embargo <= cut)]
@@ -185,10 +208,11 @@ def _forecast_one(conn, m, h, perf_entry, series, macro_rows, manifest, log):
                        'input_cutoff, decision_time_utc, p_bull, p_neutral, p_bear, threshold, base_close, '
                        'expected_outcome_date, validation_status, status, provenance) '
                        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                       ('live', store.now_utc(), m, h, name, version, rec['input_cutoff'], rec['decision_time_utc'],
+                       ('live', now.isoformat(timespec='seconds'), m, h, name, version, rec['input_cutoff'], rec['decision_time_utc'],
                         float(q[2]), float(q[1]), float(q[0]), rec['threshold'], rec['base_close'],
                         rec['expected_outcome_date'], status, 'pending', store.dumps(rec['provenance'])))
     rec['stored'] = 'new' if cur.rowcount else 'already_recorded'
+    rec['timely'] = is_timely({'created_at': now.isoformat(timespec='seconds'), 'input_cutoff': rec['input_cutoff'], 'market': m})
     log('%s %dD %s: bull %.2f neutral %.2f bear %.2f (%s, %s)' % (m, h, name, q[2], q[1], q[0], status,
                                                                  rec['stored']))
     return rec
@@ -230,6 +254,7 @@ def live_history(conn, limit=400):
         probs = {'bearish': r['p_bear'], 'neutral': r['p_neutral'], 'bullish': r['p_bull']}
         r['predicted_class'] = max(probs, key=probs.get)
         r['hit'] = None if r['status'] != 'evaluated' else r['predicted_class'] == r['actual_class']
+        r['late'] = not is_timely(r)
     return rows
 
 
@@ -240,9 +265,10 @@ def evaluated_live(conn):
     """All evaluated live forecasts, one per (market, horizon, input_cutoff): the first one recorded.
     A retrain that changes model_version may append a second row for the same cutoff; it is kept in the
     table (append-only) but never counted twice."""
-    return [dict(r) for r in conn.execute(
+    rows = [dict(r) for r in conn.execute(
         "SELECT f.* FROM forecasts f JOIN (SELECT MIN(id) AS id FROM forecasts WHERE status = 'evaluated' "
         "GROUP BY market, horizon, input_cutoff) first ON first.id = f.id ORDER BY f.id")]
+    return [r for r in rows if is_timely(r)]   # a forecast recorded after the next open is not a forecast
 
 
 def live_summary(rows):

@@ -3,7 +3,7 @@ import json
 import math
 import tempfile
 import unittest
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -236,6 +236,7 @@ class StoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'), \
                 patch('mi.paths.MARKETS_JSON', Path(tmp) / 'none.json'), patch.dict(models.GRID, FAST_GRID, clear=True):
             series = {'sp': {'rows': rows(d[:-3], closes[:-3]), 'source_id': 'licensed:sp', 'status': 'ok'}}
+            AT = datetime.combine(d[-4], time(21, 0), timezone.utc)   # recorded right after the cutoff session
             fake = lambda conn, m, snap, manifest: series.get(m, {'rows': [], 'source_id': 'fred_' + m})
             with patch('mi.prices.series', side_effect=fake):
                 with store.connect() as conn:
@@ -243,18 +244,19 @@ class StoreTest(unittest.TestCase):
                                              cfg_overrides={'min_train': 400, 'step': 63, 'bootstrap': 100})
                     self.assertEqual(perf['markets']['sp']['1']['status'], 'ok')
                     self.assertEqual(perf['gate']['nq']['allowed'], False)
-                    f1 = forecasting.forecast(conn, perf, markets=['sp'], manifest=MANIFEST, log=lambda *a: None)
+                    f1 = forecasting.forecast(conn, perf, markets=['sp'], manifest=MANIFEST, log=lambda *a: None, now=AT)
                     rec = f1['markets']['sp']['1']
                     self.assertAlmostEqual(rec['bullish_probability'] + rec['neutral_probability'] +
                                            rec['bearish_probability'], 1, places=3)
                     self.assertEqual(rec['stored'], 'new')
-                    again = forecasting.forecast(conn, perf, markets=['sp'], manifest=MANIFEST, log=lambda *a: None)
+                    self.assertTrue(rec['timely'])
+                    again = forecasting.forecast(conn, perf, markets=['sp'], manifest=MANIFEST, log=lambda *a: None, now=AT)
                     self.assertEqual(again['markets']['sp']['1']['stored'], 'already_recorded')
                     for h in ('5', '20'):
                         self.assertEqual(f1['markets']['sp'][h]['status'], 'unavailable')
                     # a different model version on the same cutoff adds a row, never replaces
                     conn.execute("UPDATE forecasts SET model_version = model_version || '-old'")
-                    forecasting.forecast(conn, perf, markets=['sp'], manifest=MANIFEST, log=lambda *a: None)
+                    forecasting.forecast(conn, perf, markets=['sp'], manifest=MANIFEST, log=lambda *a: None, now=AT)
                     self.assertEqual(conn.execute('SELECT COUNT(*) FROM forecasts').fetchone()[0], 2)
                     self.assertEqual(forecasting.resolve_outcomes(conn, MANIFEST), 0)   # outcome not yet observed
                     series['sp']['rows'] = rows(d, closes)                              # new close arrives
@@ -284,8 +286,9 @@ class StoreTest(unittest.TestCase):
                     conn.execute("INSERT INTO forecasts (kind, created_at, market, horizon, model_name, model_version, "
                                  "input_cutoff, decision_time_utc, p_bull, p_neutral, p_bear, threshold, base_close, "
                                  "expected_outcome_date, validation_status, status, actual_class, provenance) "
-                                 "VALUES ('live','t','sp',1,'m','v1',?,'t',.5,.3,.2,.01,100,'t','validated',"
-                                 "'evaluated','bullish','{}')", ((base + timedelta(days=i)).isoformat(),))
+                                 "VALUES ('live',?,'sp',1,'m','v1',?,'t',.5,.3,.2,.01,100,'t','validated',"
+                                 "'evaluated','bullish','{}')",
+                                 ((base + timedelta(days=i)).isoformat() + 'T21:00:00+00:00', (base + timedelta(days=i)).isoformat()))
                 self.assertEqual(len(forecasting.live_history(conn)), 400)
                 summ = forecasting.live_summary(forecasting.evaluated_live(conn))[0]
                 self.assertEqual(summ['n'], 500)
@@ -293,6 +296,25 @@ class StoreTest(unittest.TestCase):
                 self.assertAlmostEqual(summ['brier'], .25 + .09 + .04)
                 self.assertIsNone(summ['warning'])
                 self.assertGreater(summ['skill_vs_uniform'], 0)
+
+    def test_only_timely_forecasts_count_and_stale_inputs_are_refused(self):
+        mk = lambda created, cutoff, market='sp': {'created_at': created, 'input_cutoff': cutoff, 'market': market}
+        self.assertTrue(forecasting.is_timely(mk('2026-10-14T20:45:00+00:00', '2026-10-14')))       # US evening
+        self.assertTrue(forecasting.is_timely(mk('2026-10-15T13:00:00+00:00', '2026-10-14')))       # before 09:30 ET
+        self.assertFalse(forecasting.is_timely(mk('2026-10-15T14:00:00+00:00', '2026-10-14')))      # after the open
+        self.assertTrue(forecasting.is_timely(mk('2026-10-11T23:30:00+00:00', '2026-10-09', 'ks')))  # Fri -> Mon 08:30 KST
+        self.assertFalse(forecasting.is_timely(mk('2026-10-15T07:30:00+00:00', '2026-10-14', 'ks')))  # 16:30 KST next day
+        self.assertFalse(forecasting.is_timely(mk('2026-10-15T15:01:00+00:00', '2022-10-04', 'ks')))  # found on real data
+        with tempfile.TemporaryDirectory() as tmp:
+            with store.connect(Path(tmp) / 'mi.sqlite') as conn:
+                for i, created in enumerate(('2022-10-04T08:00:00+00:00', '2026-10-15T15:01:00+00:00')):
+                    conn.execute("INSERT INTO forecasts (kind, created_at, market, horizon, model_name, model_version, "
+                                 "input_cutoff, decision_time_utc, p_bull, p_neutral, p_bear, threshold, base_close, "
+                                 "expected_outcome_date, validation_status, status, actual_class, provenance) "
+                                 "VALUES ('live',?,'ks',?,'m','v1','2022-10-04','t',.5,.3,.2,.01,100,'t','x',"
+                                 "'evaluated','bullish','{}')", (created, i + 1))
+                self.assertEqual([r['horizon'] for r in forecasting.evaluated_live(conn)], [1])
+                self.assertEqual([r['late'] for r in forecasting.live_history(conn)], [True, False])   # newest id first
 
     def test_price_revision_logged_and_job_interrupted(self):
         with tempfile.TemporaryDirectory() as tmp:

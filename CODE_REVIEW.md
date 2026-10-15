@@ -111,6 +111,7 @@ C1과 C2는 코드 버그가 아닙니다. FRED 약관과 기존 동작(원칙 6
 | H9 | `anthropic` 패키지가 없어서 `--llm`이 항상 규칙 기반 문장으로 대체되었습니다 | `requirements.txt`, `briefing.llm_rewrite` | 확인 | `requirements-optional.txt`로 분리. **유료 호출이라 실제로 실행하지 않았습니다** |
 | H10 | 조건부(`conditional`) 저장 권한이 실제 조건 기재 없이도 통과했습니다. GDELT 제목의 ML 학습이 허용되어 있었습니다 | `licenses._storage_ok`, `SOURCES['gdelt_doc']` | 확인 | 수정됨. `conditions`를 적어야 통과하고, GDELT ML은 `conditional`(학습 불허)입니다 |
 | H11 | 뉴스를 저장하기 전에 `storage_allowed()`를 확인하지 않았습니다 | `news.collect` | 확인 | 수정됨. `skipped_unlicensed`를 리포트에 남깁니다 |
+| H12 | 실데이터 첫 실행: 백필이 일시적 오류로 중간에 멈춘 상태에서 학습·예측이 실행되어, 4년 전 입력(2022-10-04)으로 만든 "실시간" 예측 3건이 저장됨. 다음 판정 때 이미 알려진 결과로 채점되어 실시간 성과가 오염될 수 있었음 | `forecasting._forecast_one`, `evaluated_live`, `backfill.run` | 확인(2026-10-16) | 수정됨. 입력 7일 초과 시 예측 거부, 다음 개장 이후 기록은 집계 제외(`is_timely`, 행은 보존), 백필 일시 오류 재시도. 기존 3건은 "늦은 기록"으로 표시 |
 
 ### Medium
 
