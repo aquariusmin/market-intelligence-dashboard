@@ -194,6 +194,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rep['calls'], 1)
         self.assertEqual(rep['coverage']['ks']['rows'], 0)
 
+    def test_forecast_change_ignores_distant_previous_record(self):
+        from mi import store
+        with store.connect() as conn:
+            for i, cutoff in enumerate(('2022-10-04', '2026-10-13', '2026-10-14')):
+                conn.execute("INSERT INTO forecasts (kind, created_at, market, horizon, model_name, model_version, "
+                             "input_cutoff, decision_time_utc, p_bull, p_neutral, p_bear, threshold, base_close, "
+                             "expected_outcome_date, validation_status, status, provenance) VALUES "
+                             "('live','t','ks',5,'m','v',?,'t',?,.3,.2,.01,1,'t','x','pending','{}')", (cutoff, .3 + i / 10))
+            got = mi_cli.prev_forecast_changes(conn)
+            self.assertEqual([(g['prev_cutoff'], g['cur_cutoff']) for g in got], [('2026-10-13', '2026-10-14')])
+            conn.execute("DELETE FROM forecasts WHERE input_cutoff='2026-10-13'")
+            self.assertEqual(mi_cli.prev_forecast_changes(conn), [])
+
     def test_write_message(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

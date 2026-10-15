@@ -19,6 +19,7 @@
   - `validation.py`: purged walk-forward·지표·검증 기준
   - `forecasting.py`: 백테스트 / 실시간 예측 저장
   - `news.py`, `sentiment.py`, `events.py`, `briefing.py`
+  - `backfill.py`: KRX 장기 이력, `explain.py`: 검증 통과 모델의 전망 변화 설명, `nlp_eval.py`: 뉴스 라벨 평가
   - `store.py`: SQLite `data/mi.sqlite`
 - `scripts/mi_cli.py` — 파이프라인 진입점 → `data/dashboard/*.json`
 - `index.html`(v0.2 UI + DEMO) ← `real-data.js`(v0.2 REAL) ← `intel.js`(v1.0 패널). 빌드 단계 없음.
@@ -53,9 +54,9 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # v0.2 수집기 (12)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (84)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (92)
 node --check real-data.js && node --check intel.js
-node --test scripts/test_intel.mjs                                                # intel.js 단위 테스트 (6, vm으로 실제 파일 로드)
+node --test scripts/test_intel.mjs                                                # intel.js 단위 테스트 (8, vm으로 실제 파일 로드)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \
   .venv/bin/python scripts/ui_smoke.py [--root <fixture>] [--shots <dir>] [--expect "Tab=text"]
 .venv/bin/python .claude/skills/financial-data-audit/scripts/audit_data.py        # 읽기 전용 데이터 감사

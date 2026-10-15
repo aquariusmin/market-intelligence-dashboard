@@ -66,6 +66,12 @@ SOURCES = {
                       notes='GDELT 자체 데이터는 무제한 이용·인용 필요. 기사 제목·URL의 권리는 각 언론사 → 원문 미저장. '
                             '제목 텍스트의 ML 사용은 언론사 권리 미확인 → conditional(학습 불허). '
                             '5초당 1회 제한.'),
+    'bok_press_rss': dict(provider='Bank of Korea', dataset='보도자료·통화정책 RSS (title/link/date)',
+                          terms_url='https://www.bok.or.kr/portal/main/contents.do?menuNo=200228',
+                          collection='not_allowed', local_storage='not_allowed', ml_training='not_allowed',
+                          redistribution='not_allowed', verified_on='2026-10-16',
+                          notes='저작권보호방침: 공공데이터 목록 외 정보는 직접·딥링크로만 이용, 그 밖의 이용은 사전 승인 필요. '
+                                '보도자료 제목도 예외 없음 → 승인 전까지 미수집 (RSS 목록: /static/view/popup/rss_popup.html).'),
     'fomc_calendar': dict(provider='Federal Reserve Board', dataset='FOMC meeting calendar',
                           terms_url='https://www.federalreserve.gov/disclaimer.htm', collection='allowed',
                           local_storage='allowed', ml_training='allowed', redistribution='allowed',

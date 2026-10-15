@@ -10,6 +10,7 @@
   status     system status (+ SQLite integrity)     -> data/dashboard/status.json
   backup     online copy of data/mi.sqlite         -> data/backups/ (never deletes old copies)
   backfill   KRX KOSPI/KOSDAQ history -> archive   (resumable, rate-limited; needs KRX_API_KEY)
+  label-export / label-score   news headlines -> data/eval/news_labels.csv / accuracy -> nlp_eval.json
   morning | evening | weekly | all   composite jobs (see README schedule)
 """
 import argparse
@@ -24,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer from v0.2)
-from mi import VERSION, backfill, briefing, daily, events, forecasting, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, backfill, briefing, daily, events, forecasting, nlp_eval, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
 FRED_RISK_TTL = timedelta(days=3)   # display-only FRED snapshot: ignored and removed once older than this
@@ -160,11 +161,15 @@ def cmd_news(args):
         write('news.json', {'generated_at': store.now_utc(), 'report': report, 'items': items,
                             'sentiment_note': '영문 제목 키워드 휴리스틱(lexicon-en-v2) · 한국어 감성 미산출 · 참고용',
                             'model_licenses': licenses.MODELS,
-                            'separation_note': '뉴스 분석은 예측 모델 입력으로 사용하지 않습니다.'})
+                            'separation_note': '뉴스 분석은 예측 모델 입력으로 사용하지 않습니다.',
+                            'evaluation': nlp_eval.load_report()})
         failed = [k for k, v in report.items() if isinstance(v, dict) and v.get('status') == 'failed']
         res['status'] = 'ok' if not failed else 'partial'
         res['message'] = 'added %d; failed: %s' % (report['added'], ','.join(failed) or 'none')
         print(res['message'])
+
+
+COMPARE_MAX_GAP_DAYS = 7
 
 
 def prev_forecast_changes(conn):
@@ -178,7 +183,9 @@ def prev_forecast_changes(conn):
                 seen.append(dict(r))
             if len(seen) == 2:
                 break
-        if len(seen) == 2:
+        gap = len(seen) == 2 and (date.fromisoformat(seen[0]['input_cutoff']) -
+                                  date.fromisoformat(seen[1]['input_cutoff'])).days
+        if len(seen) == 2 and gap <= COMPARE_MAX_GAP_DAYS:   # never present a years-old record as "yesterday"
             out.append({'market': m, 'horizon': 5, 'cur': seen[0]['p_bull'], 'prev': seen[1]['p_bull'],
                         'cur_cutoff': seen[0]['input_cutoff'], 'prev_cutoff': seen[1]['input_cutoff']})
     return out
@@ -293,6 +300,22 @@ def cmd_backfill(args):
             raise RuntimeError(rep['stopped'])
 
 
+def cmd_label_export(args):
+    with store.connect() as conn:
+        added, total = nlp_eval.export(conn)
+    print('data/eval/news_labels.csv: +%d rows (total %d) · fill label_category / label_sentiment, then run label-score'
+          % (added, total))
+
+
+def cmd_label_score(args):
+    rep = nlp_eval.score()
+    write('nlp_eval.json', rep)
+    for k in ('category', 'sentiment'):
+        r = rep[k]
+        print('%s: n=%d accuracy=%s macro-F1=%s -> %s (%s)' % (k, r['n'], r['accuracy'], r['macro_f1'], r['verdict'],
+                                                           r['verdict_reason']))
+
+
 def cmd_backup(args):
     with store.connect() as conn:
         dest = store.backup(conn)
@@ -327,7 +350,7 @@ def run_all(names, args):
 
 COMMANDS = {'ingest': cmd_ingest, 'regime': cmd_regime, 'train': cmd_train, 'forecast': cmd_forecast,
             'news': cmd_news, 'briefing': cmd_briefing, 'status': cmd_status, 'backup': cmd_backup,
-            'backfill': cmd_backfill}
+            'backfill': cmd_backfill, 'label-export': cmd_label_export, 'label-score': cmd_label_score}
 COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'evening': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'weekly': ['ingest', 'regime', 'train', 'forecast'],

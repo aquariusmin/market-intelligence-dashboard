@@ -73,6 +73,18 @@ def forecast_lines(forecast):
     return lines
 
 
+def forecast_explanations(forecast):
+    """v0.6: why a validated model's probability changed since the previous session (mi.explain output)."""
+    out = []
+    for key in NAMES:
+        for h, f in sorted(((forecast or {}).get('markets', {}).get(key) or {}).items(), key=lambda kv: int(kv[0])):
+            lines = ((f or {}).get('explanation') or {}).get('lines') or []
+            if lines:
+                out.append('%s %s거래일 전망 변화(검증 통과 모델): %s' % (NAMES[key], h, lines[0]))
+                out += ['  · 주요 입력: ' + x for x in lines[1:]]
+    return out
+
+
 def outlook_changes(regimes, prev_forecasts, restricted=()):
     out = []
     for key, r in regimes.items():
@@ -164,7 +176,7 @@ def build(regimes, macro, forecast, news_items, events, prev_forecasts=None, ses
             'bearish_factors': (['%s · %s' % (NAMES[k], f) for k, f in bear][:8] + _withheld(ok, restricted, 'bearish_factors')
                                 or ['뚜렷한 위험 요인 없음']),
             'market_forecast': forecast_lines(forecast),
-            'outlook_changes': outlook_changes(regimes, prev_forecasts, restricted),
+            'outlook_changes': outlook_changes(regimes, prev_forecasts, restricted) + forecast_explanations(forecast),
             'events_to_watch': [{'date': e['date'], 'title': e['title'], 'url': e.get('url'), 'source': e['source']}
                                 for e in (events or {}).get('items', [])[:8]],
             'news': [{'title': n['title'], 'url': n['url'], 'source': n['source'], 'category': n['category'],

@@ -56,6 +56,8 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | `mi/indicators.py` | SMA·RSI(Wilder)·MACD·실현변동성·낙폭·과거 구간 백분위 | v0.2 JS 공식과 수치가 같아야 합니다(테스트). 인과적 계산만 하고, `min_periods`를 반드시 지정 |
 | `mi/regime.py` | 추세 규칙 5개 → 점수 −5..+5, 변동성 백분위 ≥ 0.70, 3일 확인 → 5개 국면. 0–100 위험 점수, 요인 문장 | 규칙은 사전에 고정합니다(데이터에 맞춰 조정하지 않음). 이력은 그 시점까지의 데이터로만 계산한 기록입니다. 위험 점수는 사용한 구성요소 수를 함께 보고 |
 | `mi/daily.py` | v0.4 전일 대비 변화(`diff`), 거시 변화, 국면 해설, 스냅샷 행 | 기준값은 사전 고정(`daily-v1`). 화면용 `text`와 수치 없는 `plain`을 함께 생성. 위험 점수는 구성요소 집합이 같을 때만 비교 |
+| `mi/explain.py` | v0.6 전망 변화 설명: 같은 모델로 직전 입력과 오늘 입력을 비교, 입력 하나씩 되돌려 분해 | 검증 통과 모델에만 생성. 인과 아님을 명시. 상호작용 몫 별도 |
+| `mi/nlp_eval.py` | 사용자 라벨 대비 뉴스 분류·감성 정확도 | 재내보내기 시 라벨 보존. 판정 기준 사전 고정(라벨 100개 이상, macro-F1 0.5 이상) |
 | `mi/licenses.py` | `SOURCES` 레지스트리, `ml_allowed`, `storage_allowed`, 사용자 manifest | 확인되지 않은 권한은 불허. 조건부 저장은 `conditions`를 적어야 통과 |
 | `mi/dataset.py` | 자기 시장 피처 13개, 거시·교차시장 피처, 3분류 라벨(neutral 대역 k=0.43·σ60) | 라이선스를 통과하지 못한 입력의 피처는 제외(`dropped_features`). 한국 예측은 미국 t−1 값만 사용 |
 | `mi/models.py` | `class_frequency`, `momentum_rule`, LR, LightGBM. 보정 none·temperature·sigmoid·isotonic | 확률 행의 합 = 1, 모든 값 > 0 |
@@ -82,7 +84,7 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 - **이식성:** 표준 SQL 타입만 씁니다. PostgreSQL로 옮길 수 있습니다.
 
 ### 2.4 오케스트레이션 — `scripts/mi_cli.py`
-- **단일 명령:** `ingest` · `regime` · `train` · `forecast` · `news` · `briefing` · `status` · `backup` · `backfill`
+- **단일 명령:** `ingest` · `regime` · `train` · `forecast` · `news` · `briefing` · `status` · `backup` · `backfill` · `label-export` · `label-score`
 - **복합 명령:**
   - `morning` / `evening`: ingest → regime → forecast → news → briefing
   - `weekly`: ingest → regime → train → forecast
@@ -166,9 +168,9 @@ dataset.build ─> 개발 구간 ─┬─ fold: fit → purge(h)+embargo → ca
 | 범위 | 파일 | 수 | 실행 |
 |---|---|---|---|
 | v0.2 수집기 | `scripts/test_data.py` | 12 | `python3 test_data.py` (stdlib) |
-| 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 71 | `.venv` unittest |
-| CLI·로컬 서버 | `test_mi_cli.py` | 13 | 같음 |
-| 화면 로직 | `scripts/test_intel.mjs` | 6 | `node --test` (vm으로 index.html 인라인 → real-data.js → intel.js 로드) |
+| 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 78 | `.venv` unittest |
+| CLI·로컬 서버 | `test_mi_cli.py` | 14 | 같음 |
+| 화면 로직 | `scripts/test_intel.mjs` | 8 | `node --test` (vm으로 index.html 인라인 → real-data.js → intel.js 로드) |
 | 브라우저 | `scripts/ui_smoke.py` | 24 뷰 | headless Chromium |
 | 데이터 감사 | `.claude/skills/financial-data-audit/scripts/audit_data.py` | — | 읽기 전용 |
 

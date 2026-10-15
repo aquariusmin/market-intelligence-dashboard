@@ -22,7 +22,7 @@ function load() {
   vm.runInContext(read('index.html').match(/<script>([\s\S]*?)<\/script>/)[1], ctx, {filename: 'index.html'});
   vm.runInContext('render = () => {}', ctx);   // page rendering needs a real DOM (covered by ui_smoke.py)
   for (const f of ['real-data.js', 'intel.js']) vm.runInContext(read(f), ctx, {filename: f});
-  const api = vm.runInContext(`({esc, safeUrl, link, INTEL_SHAPE, flags, dailyChanges, loadIntel,
+  const api = vm.runInContext(`({esc, safeUrl, link, INTEL_SHAPE, flags, dailyChanges, explainBlock, nlpEval, loadIntel,
     getIntel: () => intel, getErrors: () => intelErrors, setIntel: v => { intel = v; }})`, ctx);
   return {ctx, api};
 }
@@ -87,4 +87,21 @@ test('daily changes are escaped and tolerate older files', () => {
   assert.doesNotMatch(html, /<script>/);
   assert.match(api.dailyChanges({daily: {changes: []}}), /기준 이상 변화 없음/);
   assert.equal(api.dailyChanges({daily: {changes: 'bad'}}).includes('기준 이상 변화 없음'), true);
+});
+
+test('outcome-change explanation renders only real lines, escaped', () => {
+  const {api} = load();
+  assert.equal(api.explainBlock(undefined), '');
+  assert.equal(api.explainBlock({status: 'not_computed'}), '');
+  const html = api.explainBlock({previous_cutoff: '2026-10-13', cutoff: '2026-10-14', lines: ['상승 30% → 33%', '<b>x</b>'], note: 'n'});
+  assert.match(html, /전망 변화 설명 · 2026-10-13 → 2026-10-14/);
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
+});
+
+test('news evaluation line handles missing and present reports', () => {
+  const {api} = load();
+  assert.match(api.nlpEval(null), /라벨 없음/);
+  const html = api.nlpEval({rule: 'r', category: {verdict: '참고용', n: 12, accuracy: 0.75, macro_f1: 0.5}, sentiment: {verdict: '<i>', n: 0}});
+  assert.match(html, /분류 참고용 · 라벨 12개 · 정확도 75%/);
+  assert.match(html, /감성 &lt;i&gt;/);
 });

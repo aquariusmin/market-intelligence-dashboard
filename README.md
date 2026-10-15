@@ -80,6 +80,16 @@ chmod 600 ~/.config/mi/env
 - 일시적 오류(JSON이 아닌 응답, 서버 5xx, 시간 초과)는 5초, 30초 쉬고 다시 시도합니다. 인증 오류나 이후에도 계속되는 오류가 나면 멈추고, 그때까지 받은 행은 보존합니다. 결과는 `data/dashboard/backfill.json`에 기록됩니다.
 - v0.2 `markets.json`은 바꾸지 않습니다. 분석과 학습은 SQLite 아카이브와 스냅샷을 합쳐 읽습니다.
 
+### 뉴스 분류·감성 정확도 평가 (직접 라벨)
+
+```sh
+.venv/bin/python scripts/mi_cli.py label-export   # data/eval/news_labels.csv에 새 제목 추가 (기존 라벨은 보존)
+# 파일의 label_category(뉴스 범주 이름 또는 Other)와 label_sentiment(positive/neutral/negative)를 채운 뒤
+.venv/bin/python scripts/mi_cli.py label-score    # 정확도·macro-F1 → data/dashboard/nlp_eval.json, 뉴스 탭에 표시
+```
+
+라벨이 100개 이상이고 macro-F1이 0.5 이상일 때만 "평가 통과"로 표시하고, 그 전에는 "참고용"입니다(2026-10-15 사전 고정).
+
 ### 라이선스가 확인된 가격 데이터로 예측 활성화
 
 ML 학습 권한을 보유한 데이터(예: 계약한 유료 공급원)가 있으면 `data/licensed/<market>.csv`(`date,close` 헤더)와 `data/licensed/manifest.json`을 만드세요. 시장 코드는 `sp nq ks kq`입니다.
@@ -207,6 +217,13 @@ KRX OPEN API (키 필요) ───────┤                              
 - 학습 가능한 평균회귀 신호가 있는 경우, 로지스틱·LightGBM이 기준 모델 대비 log loss 개선 CI 하한 ≈ 0.09로 검증을 통과했습니다.
 - 합성 결과는 `data/`에 저장되지 않으며 화면에 실제 성능으로 표시되지 않습니다.
 
+### 전망 변화 설명 (ROADMAP v0.6)
+
+- 검증을 통과한 모델에만 만듭니다(현재 KOSDAQ 5거래일). 신뢰할 수 없는 확률에 그럴듯한 설명을 붙이지 않기 위해서입니다.
+- 같은 모델로 직전 거래일 입력과 오늘 입력을 각각 계산하고, 입력을 하나씩 직전 값으로 되돌려 확률 변화를 입력별로 나눕니다(`mi/explain.py`, LLM 없음). 0.5%p 미만의 영향은 표시하지 않고, 입력 간 상호작용 몫은 따로 기록합니다.
+- 예측 카드와 브리핑 "Outlook Changes"에 표시합니다. 모델 입력의 변화를 보여 줄 뿐, 시장 움직임의 원인을 뜻하지 않습니다.
+- 브리핑의 "전일 대비 확률 변화"는 기준일 차이가 7일 이내인 예측끼리만 비교합니다.
+
 ### 전일 대비 변화 (ROADMAP v0.4 Daily Market Intelligence)
 
 - `mi/daily.py`가 시장마다 현재 상태와 **전 거래일 상태**를 비교합니다. 전 거래일 상태(`regime.analyze`의 `previous`)는 그날까지의 데이터로만 계산하므로, 하루 전에 실행했을 때의 결과와 같습니다(테스트로 확인).
@@ -250,8 +267,8 @@ Copyright © S&P Dow Jones Indices LLC / Nasdaq, Inc. / Korea Exchange. 데이�
 ```sh
 make test      # 또는 아래 세 명령
 cd scripts && python3 test_data.py                                            # v0.2: 12 tests OK
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 84 tests OK
-node --test scripts/test_intel.mjs                                            # intel.js: 6 tests OK
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 92 tests OK
+node --test scripts/test_intel.mjs                                            # intel.js: 8 tests OK
 node --check real-data.js && node --check intel.js                            # OK
 MI_CHROMIUM=<chromium> .venv/bin/python scripts/ui_smoke.py                    # 24 views, 2 widths: OK
 ```

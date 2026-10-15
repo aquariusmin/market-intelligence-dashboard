@@ -9,7 +9,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import numpy as np
 
-from . import VERSION, dataset, licenses, models, prices, store, timing, validation
+from . import VERSION, dataset, explain, licenses, models, prices, store, timing, validation
 from .macro import SERIES as MACRO
 
 LABELS = dataset.CLASSES
@@ -201,6 +201,12 @@ def _forecast_one(conn, m, h, perf_entry, series, macro_rows, manifest, log, now
            'provenance': {'target_source': series[m]['source_id'],
                           'feature_sources': sorted(set(ds['feature_sources'].values())),
                           'backtest_run': perf_entry.get('run_id'), 'engine_version': VERSION}}
+    if status == 'validated' and n >= 2:   # outcome-change explanation only for a model that passed the gate
+        predict = lambda x: calib.transform(model.predict_proba(x))
+        att = explain.attribute(predict, X.iloc[[n - 1]], X.iloc[[n - 2]])
+        rec['explanation'] = explain.summary(att, X.index[-2].date().isoformat(), cutoff.isoformat())
+    else:
+        rec['explanation'] = {'status': 'not_computed', 'reason': '검증을 통과한 모델에만 전망 변화 설명을 만듭니다.'}
     s = sum(rec[k] for k in ('bullish_probability', 'neutral_probability', 'bearish_probability'))
     if abs(s - 1) >= 1e-3:
         raise ValueError('probabilities must sum to 1 (got %.6f)' % s)

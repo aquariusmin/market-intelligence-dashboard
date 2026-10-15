@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import backfill, briefing, daily, events, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import backfill, briefing, daily, events, explain, nlp_eval, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -705,6 +705,90 @@ class BackfillTest(unittest.TestCase):
             self.assertEqual(backfill.coverage(conn, 'ks')['rows'], 3)    # 09-28..09-30 kept
             self.assertNotIn('kq', rep['markets'])                        # stopped before the next market
         self.assertNotIn('secret', rep['stopped'])
+
+
+class ExplainTest(unittest.TestCase):
+    """v0.6 outcome-change explanation: one-at-a-time revert on the same fitted model."""
+
+    @staticmethod
+    def softmax_model(weights):
+        def predict(x):
+            z = np.array([[0.0, 0.0, sum(w * float(x[c].iloc[i]) for c, w in weights.items())] for i in range(len(x))])
+            e = np.exp(z - z.max(axis=1, keepdims=True))
+            return e / e.sum(axis=1, keepdims=True)
+        return predict
+
+    def test_single_changed_input_explains_the_whole_move(self):
+        prev = pd.DataFrame([{'vol60': 1.0, 'ret5': 1.0, 'ks_mom20': 2.0}])
+        cur = pd.DataFrame([{'vol60': 3.0, 'ret5': 1.0, 'ks_mom20': 2.0}])
+        att = explain.attribute(self.softmax_model({'vol60': 0.5, 'ret5': 0.1}), cur, prev)
+        self.assertEqual([r['feature'] for r in att['contributions']], ['vol60'])   # unchanged inputs are skipped
+        self.assertAlmostEqual(att['contributions'][0]['d_bull'], att['total'][2])
+        self.assertTrue(np.allclose(att['interaction'], 0))
+        s = explain.summary(att, '2026-10-13', '2026-10-14')
+        self.assertIn('60일 변동성 1 → 3', s['lines'][1])
+        self.assertGreater(s['delta_pp']['bullish'], 0)
+
+    def test_briefing_lists_explanations_only_when_present(self):
+        fc = {'markets': {'kq': {'5': {'status': 'validated', 'bullish_probability': .33, 'neutral_probability': .43,
+                                       'bearish_probability': .24, 'model_name': 'lightgbm',
+                                       'explanation': {'lines': ['상승 확률 30% → 33% (+3.0%p)', '60일 변동성 51 → 52: 상승 +1.0%p']}}},
+                          'ks': {'5': {'status': 'not_validated', 'explanation': {'status': 'not_computed'}}}}}
+        got = briefing.forecast_explanations(fc)
+        self.assertEqual(got, ['KOSDAQ 5거래일 전망 변화(검증 통과 모델): 상승 확률 30% → 33% (+3.0%p)',
+                               '  · 주요 입력: 60일 변동성 51 → 52: 상승 +1.0%p'])
+        self.assertEqual(briefing.forecast_explanations({}), [])
+
+    def test_order_labels_and_small_moves(self):
+        prev = pd.DataFrame([{'a': 0.0, 'b': 0.0, 'rel_strength_sp': 0.0}])
+        cur = pd.DataFrame([{'a': 1.0, 'b': 1.0, 'rel_strength_sp': 1.0}])
+        att = explain.attribute(self.softmax_model({'a': 0.05, 'b': 0.5, 'rel_strength_sp': 0.0001}), cur, prev)
+        self.assertEqual(att['contributions'][0]['feature'], 'b')                     # largest first
+        s = explain.summary(att, 'x', 'y')
+        self.assertNotIn('rel_strength_sp', [r['feature'] for r in s['top']])         # < 0.5 %p hidden
+        self.assertEqual(explain.label('rel_strength_sp'), 'S&P 500 대비 상대강도')
+        self.assertEqual(explain.label('kq_corr60'), 'KOSDAQ 60일 수익률 상관')
+        none = explain.summary(explain.attribute(self.softmax_model({'a': 1}), prev, prev), 'x', 'y')
+        self.assertIn('0.5%p 미만', none['lines'][-1])
+
+
+class NlpEvalTest(unittest.TestCase):
+    def test_export_keeps_user_labels_and_score_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csvp = Path(tmp) / 'eval' / 'labels.csv'
+            with store.connect(Path(tmp) / 'mi.sqlite') as conn:
+                for i in range(3):
+                    conn.execute("INSERT INTO news (id, title, source, url, published_at, collected_at, language, "
+                                 "related_markets, category, sentiment_label, importance, status, provider) VALUES "
+                                 "(?,?,?,?,?,?,?,?,?,?,?,?,?)", ('n%d' % i, 'Title %d' % i, 'Fed', 'https://x/%d' % i,
+                                 '2026-10-0%dT00:00:00+00:00' % (i + 1), 't', 'en', '[]', 'Monetary Policy',
+                                 'neutral', 3, 'new' if i < 2 else 'duplicate', 'fed_press_rss'))
+                self.assertEqual(nlp_eval.export(conn, csvp), (2, 2))          # duplicates are not exported
+                rows = nlp_eval.read_labels(csvp)
+                rows[0]['label_category'], rows[0]['label_sentiment'] = 'Monetary Policy', 'neutral'
+                with open(csvp, 'w', newline='', encoding='utf-8') as f:
+                    import csv as _csv
+                    w = _csv.DictWriter(f, fieldnames=nlp_eval.COLUMNS); w.writeheader(); w.writerows(rows)
+                conn.execute("UPDATE news SET status='new' WHERE id='n2'")
+                self.assertEqual(nlp_eval.export(conn, csvp), (1, 3))
+                kept = {r['id']: r for r in nlp_eval.read_labels(csvp)}
+                self.assertEqual(kept['n0']['label_category'], 'Monetary Policy')   # user label survives re-export
+                self.assertEqual(csvp.stat().st_mode & 0o777, 0o600)
+            rep = nlp_eval.score(csvp)
+            self.assertEqual(rep['category']['n'], 1)
+            self.assertEqual(rep['category']['accuracy'], 1.0)
+            self.assertEqual(rep['category']['verdict'], '참고용')                  # fewer than 100 labels
+
+    def test_metrics_and_unknown_labels(self):
+        rows = [{'pred_sentiment': p, 'label_sentiment': t} for p, t in
+                [('positive', 'positive')] * 60 + [('neutral', 'neutral')] * 40 + [('negative', 'positive')] * 10 +
+                [('neutral', 'bullish')]]
+        r = nlp_eval._task(rows, 'pred_sentiment', 'label_sentiment', nlp_eval.SENTIMENTS)
+        self.assertEqual(r['n'], 110)
+        self.assertEqual(r['unknown_labels'], ['bullish'])
+        self.assertAlmostEqual(r['per_class']['positive']['recall'], 60 / 70)
+        self.assertEqual(r['per_class']['negative']['f1'], None)                   # no true negatives labelled
+        self.assertEqual(r['verdict'], '평가 통과')
 
 
 class JobLogTest(unittest.TestCase):
