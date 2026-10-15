@@ -44,6 +44,7 @@
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # make setup
 .venv/bin/python scripts/mi_cli.py ingest|regime|train|forecast|news|briefing|status
 .venv/bin/python scripts/mi_cli.py morning|evening|weekly|all                    # 단계 실패 격리
+.venv/bin/python scripts/mi_cli.py backup | backfill [--since YYYY-MM-DD]          # SQLite 백업 / KRX 이력 백필(키 필요, 재개 가능)
 python3 scripts/serve.py --port 3000                                              # make dev → localhost:3000 (허용 파일만·Host 검사·CSP)
 MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                  # 실데이터와 격리된 실험
 ```
@@ -52,7 +53,7 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # v0.2 수집기 (12)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (78)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # v1.0 엔진·CLI (84)
 node --check real-data.js && node --check intel.js
 node --test scripts/test_intel.mjs                                                # intel.js 단위 테스트 (6, vm으로 실제 파일 로드)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \

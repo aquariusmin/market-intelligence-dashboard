@@ -18,8 +18,8 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
                                              ▼
                     data/mi.sqlite  (추가 전용 · 라이선스 게이트 storage_allowed)
        prices · macro · observation_revisions · forecasts · backtest_runs/predictions
-       holdout_registry · news · briefings · daily_snapshots · job_runs
-                (PRAGMA user_version=3, WAL)
+       holdout_registry · news · briefings · daily_snapshots · krx_calendar · provider_calls · job_runs
+                (PRAGMA user_version=4, WAL)
                                              │
      ┌──────────── 분석 (오프라인, 결정적) ──┼─────────────────────────────────────┐
      │ timing ─ indicators ─ regime          │  licenses (ml_allowed 게이트)        │
@@ -43,6 +43,7 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | 모듈 | 입력 | 출력 | 비고 |
 |---|---|---|---|
 | `collect_data.py`, `providers.py` | FRED CSV, KRX `idx/{kospi,kosdaq}_dd_trd` | `markets.json` | v0.2 인터페이스를 **변경 금지**. curl을 하위 프로세스로 쓰고, 키는 stdin으로만 넘기고, 재시도는 3회. `--output`으로 경로를 바꿀 수 있음 |
+| `mi/backfill.py` | KRX OPEN API(기준일별) | `prices`, `krx_calendar` | v0.5 장기 이력. 이어 받기, 하루 예산, 오류 시 중단(진행분 보존). 어제(KST)까지만 요청 |
 | `mi/prices.py` | `markets.json` | `prices` 테이블 | `storage_allowed()`를 통과한 소스만 보관(현재 KRX만). FRED는 읽기만 |
 | `mi/macro.py` | Fed DDP CSV(H.15 3개, H.10 2개). 옵트인 시 FRED VIX·ICE | `macro` 테이블 / `fred_risk.json`(TTL 3일) | 5년 단위로 나눠 받고, 범위를 검사하고, 개정 이력을 기록 |
 | `mi/news.py` | Fed·SEC RSS, GDELT DOC | `news` 테이블 | 메타데이터만 저장. 중복은 삭제하지 않고 `duplicate_of`로 연결. 429를 받으면 나머지 쿼리를 중단 |
@@ -73,13 +74,15 @@ Fed·SEC RSS,GDELT┤ mi/news.py, mi/events.py  │                             
 | `news` | id(정규화한 URL 해시) | 추가와 중복 연결 |
 | `briefings` | id | 추가 전용. 보관용 사본: 보관이 허용되지 않은 소스의 가격 파생 수치는 빼고 라벨만 저장(`redacted_markets`) |
 | `daily_snapshots` | UNIQUE(market, as_of, method, payload_hash) | 추가 전용, 멱등. 보관 불가 소스 시장은 라벨만 저장. 감사 기록일 뿐 계산 입력이 아님 |
+| `krx_calendar` | (market, date) | 백필 응답 기록(trading / no_data). 이어 받기와 관측 거래일 달력 |
+| `provider_calls` | (provider, day_kst) | KRX 하루 호출 수(실행 간 누적, 예산 8,000/한도 10,000) |
 | `job_runs` | id | running → ok/partial/failed. 6시간이 지나면 interrupted |
 
 - **연결 설정:** WAL, `timeout=60s`, `PRAGMA user_version`. 마이그레이션은 `_migrate()`에 단계를 추가하는 방식으로만 합니다.
 - **이식성:** 표준 SQL 타입만 씁니다. PostgreSQL로 옮길 수 있습니다.
 
 ### 2.4 오케스트레이션 — `scripts/mi_cli.py`
-- **단일 명령:** `ingest` · `regime` · `train` · `forecast` · `news` · `briefing` · `status` · `backup`
+- **단일 명령:** `ingest` · `regime` · `train` · `forecast` · `news` · `briefing` · `status` · `backup` · `backfill`
 - **복합 명령:**
   - `morning` / `evening`: ingest → regime → forecast → news → briefing
   - `weekly`: ingest → regime → train → forecast
@@ -163,8 +166,8 @@ dataset.build ─> 개발 구간 ─┬─ fold: fit → purge(h)+embargo → ca
 | 범위 | 파일 | 수 | 실행 |
 |---|---|---|---|
 | v0.2 수집기 | `scripts/test_data.py` | 12 | `python3 test_data.py` (stdlib) |
-| 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 66 | `.venv` unittest |
-| CLI·로컬 서버 | `test_mi_cli.py` | 12 | 같음 |
+| 엔진 | `test_mi_forecasting.py`, `test_mi_analysis.py` | 71 | `.venv` unittest |
+| CLI·로컬 서버 | `test_mi_cli.py` | 13 | 같음 |
 | 화면 로직 | `scripts/test_intel.mjs` | 6 | `node --test` (vm으로 index.html 인라인 → real-data.js → intel.js 로드) |
 | 브라우저 | `scripts/ui_smoke.py` | 24 뷰 | headless Chromium |
 | 데이터 감사 | `.claude/skills/financial-data-audit/scripts/audit_data.py` | — | 읽기 전용 |

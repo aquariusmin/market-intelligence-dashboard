@@ -30,6 +30,7 @@ make news                       # Fed/SEC RSS + GDELT 메타데이터 → news.j
 make briefing                   # 규칙 기반 한국어 브리핑 → briefing.json
 make status                     # 시스템 상태(+ SQLite 무결성·행 수·백업 수) → status.json
 .venv/bin/python scripts/mi_cli.py backup   # data/mi.sqlite 온라인 백업 → data/backups/ (자동 삭제 없음)
+.venv/bin/python scripts/mi_cli.py backfill # KRX KOSPI/KOSDAQ 10년 이력 → SQLite (키 필요 · 재개 가능 · 하루 8,000회 이내)
 
 # 4) 대시보드
 make dev                        # = python3 scripts/serve.py --port 3000 (127.0.0.1 전용 · 허용 파일만 · Host 검사 · CSP)
@@ -61,6 +62,22 @@ chmod 600 ~/.config/mi/env
 - `mi_cli.py`는 `KRX_API_KEY`, `ANTHROPIC_API_KEY` 두 줄만 읽고 셸 코드로 실행하지 않습니다. 이미 `export`한 값이 있으면 그 값이 우선합니다.
 - v0.2 수집기를 직접 실행할 때(`python3 scripts/collect_data.py`)는 같은 터미널에서 `export KRX_API_KEY=...`를 하거나 `set -a; . ~/.config/mi/env; set +a`로 불러옵니다.
 - 확인: `python3 scripts/collect_data.py --check-krx 2026-10-14`
+
+### KRX 장기 이력 백필 (예측 학습용)
+
+학습에는 최소 504거래일과 holdout 구간이 필요하므로, 키를 넣은 뒤 한 번 실행합니다.
+
+```sh
+.venv/bin/python scripts/mi_cli.py backfill                      # 기본: 10년 전 1월 2일부터 어제(KST)까지
+.venv/bin/python scripts/mi_cli.py backfill --since 2016-01-04 --max-calls 500   # 범위·호출 수 지정
+.venv/bin/python scripts/mi_cli.py train && .venv/bin/python scripts/mi_cli.py forecast
+```
+
+- 하루 1회 호출 = 시장 1개 × 기준일 1개입니다. 10년 × 2시장이면 약 5,000회이고, KRX 한도는 키당 하루 10,000회입니다.
+- 이 도구는 하루 8,000회까지만 쓰고(`provider_calls`에 실행 간 누적), 호출 사이에 0.2초 쉽니다. 한도에 닿으면 멈추며, 다음 날 같은 명령으로 이어서 받습니다.
+- 이미 받은 날짜와, 일주일 이상 지난 "데이터 없음" 날짜(휴장일)는 다시 묻지 않습니다. 응답은 `krx_calendar`에 남아 관측된 거래일 달력이 됩니다.
+- 인증·네트워크 오류가 나면 즉시 멈추고, 그때까지 받은 행은 보존합니다. 결과는 `data/dashboard/backfill.json`에 기록됩니다.
+- v0.2 `markets.json`은 바꾸지 않습니다. 분석과 학습은 SQLite 아카이브와 스냅샷을 합쳐 읽습니다.
 
 ### 라이선스가 확인된 가격 데이터로 예측 활성화
 
@@ -231,7 +248,7 @@ Copyright © S&P Dow Jones Indices LLC / Nasdaq, Inc. / Korea Exchange. 데이�
 ```sh
 make test      # 또는 아래 세 명령
 cd scripts && python3 test_data.py                                            # v0.2: 12 tests OK
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 78 tests OK
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli  # v1.0: 84 tests OK
 node --test scripts/test_intel.mjs                                            # intel.js: 6 tests OK
 node --check real-data.js && node --check intel.js                            # OK
 MI_CHROMIUM=<chromium> .venv/bin/python scripts/ui_smoke.py                    # 24 views, 2 widths: OK

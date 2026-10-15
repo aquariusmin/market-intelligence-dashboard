@@ -61,12 +61,17 @@ CREATE TABLE IF NOT EXISTS daily_snapshots (
   source_id TEXT NOT NULL, regime TEXT NOT NULL, risk_level TEXT, restricted INTEGER NOT NULL,
   payload TEXT NOT NULL, payload_hash TEXT NOT NULL,
   UNIQUE (market, as_of, method, payload_hash));
+CREATE TABLE IF NOT EXISTS krx_calendar (
+  market TEXT NOT NULL, date TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('trading', 'no_data')),
+  checked_at TEXT NOT NULL, PRIMARY KEY (market, date));
+CREATE TABLE IF NOT EXISTS provider_calls (
+  provider TEXT NOT NULL, day_kst TEXT NOT NULL, calls INTEGER NOT NULL, PRIMARY KEY (provider, day_kst));
 CREATE TABLE IF NOT EXISTS job_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, started_at TEXT NOT NULL,
   finished_at TEXT, status TEXT NOT NULL, message TEXT);
 """
 ARCHIVE_TABLES = ('prices', 'macro', 'forecasts', 'backtest_runs', 'news', 'briefings', 'job_runs')
-SCHEMA_VERSION = 3  # PRAGMA user_version; bump with an explicit migration step in _migrate()
+SCHEMA_VERSION = 4  # PRAGMA user_version; bump with an explicit migration step in _migrate()
 BUSY_TIMEOUT_S = 60
 STALE_JOB_HOURS = 6
 
@@ -114,7 +119,7 @@ def _migrate(conn):
         # an archive that already holds data (any older version, including unversioned v1 files) is copied first
         if any(conn.execute('SELECT 1 FROM %s LIMIT 1' % t).fetchone() for t in ARCHIVE_TABLES):
             backup(conn, suffix='pre-v%d' % SCHEMA_VERSION)
-        # v1 -> v2: holdout_registry table; v2 -> v3: daily_snapshots table (both created by SCHEMA above).
+        # v2: holdout_registry; v3: daily_snapshots; v4: krx_calendar, provider_calls (all created by SCHEMA above).
         conn.execute('PRAGMA user_version = %d' % SCHEMA_VERSION)
         conn.commit()
 

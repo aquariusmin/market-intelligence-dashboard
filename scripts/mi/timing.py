@@ -139,10 +139,14 @@ def asof_join(decisions, observed, available, values, name):
     decisions: DatetimeIndex (UTC, any order); observed/available/values: aligned arrays.
     Returns a Series indexed like `decisions`.
     """
-    left = pd.DataFrame({'decision': decisions, 'pos': range(len(decisions))}).sort_values('decision')
+    # one timestamp resolution on both sides: pandas infers [s] for empty or second-precision input and [us]
+    # elsewhere, and merge_asof refuses to compare different resolutions
+    unit = 'datetime64[ns, UTC]'
+    left = pd.DataFrame({'decision': pd.DatetimeIndex(decisions).astype(unit), 'pos': range(len(decisions))}
+                        ).sort_values('decision')
     # Ties (e.g. a whole H.10 week released at once) resolve to the latest observation date, deterministically.
-    right = pd.DataFrame({'available': available, name: values, 'obs_date': pd.to_datetime(list(observed))}
-                         ).sort_values(['available', 'obs_date'], kind='mergesort')
+    right = pd.DataFrame({'available': pd.DatetimeIndex(available).astype(unit), name: values,
+                          'obs_date': pd.to_datetime(list(observed))}).sort_values(['available', 'obs_date'], kind='mergesort')
     merged = pd.merge_asof(left, right, left_on='decision', right_on='available', direction='backward')
     return merged.sort_values('pos')[name].to_numpy()
 

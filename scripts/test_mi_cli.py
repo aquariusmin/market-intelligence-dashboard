@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from argparse import Namespace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -180,6 +180,19 @@ class CliTest(unittest.TestCase):
         status = json.loads((paths.DASHBOARD / 'status.json').read_text())
         self.assertEqual(status['storage']['integrity'], 'ok')
         self.assertEqual(status['storage']['rows']['daily_snapshots'], 4)
+
+    def test_backfill_command_reports_and_fails_on_provider_error(self):
+        with patch.dict('os.environ', {}, clear=True), self.assertRaisesRegex(RuntimeError, 'KRX_API_KEY 없음'):
+            mi_cli.cmd_backfill(self.args(since=date(2026, 9, 1), until=None, max_calls=None, markets=None))
+        err = RuntimeError('데이터 요청 실패 (HTTP 401) · 인증키 유효성 확인')
+        with patch('providers.krx_day', side_effect=err), patch.dict('os.environ', {'KRX_API_KEY': 'test-key'}):
+            with self.assertRaises(RuntimeError):
+                mi_cli.cmd_backfill(self.args(since=date(2026, 9, 1), until=None, max_calls=None, markets=None))
+        rep = json.loads((paths.DASHBOARD / 'backfill.json').read_text())
+        self.assertIn('HTTP 401', rep['stopped'])
+        self.assertNotIn('test-key', json.dumps(rep))
+        self.assertEqual(rep['calls'], 1)
+        self.assertEqual(rep['coverage']['ks']['rows'], 0)
 
     def test_write_message(self):
         out = io.StringIO()

@@ -124,7 +124,7 @@ C1과 C2는 코드 버그가 아닙니다. FRED 약관과 기존 동작(원칙 6
 | M6 | `mi_cli` 테스트가 하나도 없었습니다 | `scripts/test_mi_cli.py` | 확인 | 7개 추가. 그래도 커버리지가 59%로 가장 낮습니다(§3.8) |
 | M7 | JavaScript 단위 테스트가 없습니다 | `intel.js`, `real-data.js` | 확인 | 수정됨(v0.4). `scripts/test_intel.mjs` 6개 |
 | M8 | 의존성에 하한만 있고 lock 파일이 없었습니다 | `requirements.txt` | 확인 | 상한을 지정했습니다. lock 파일은 아직 없습니다 |
-| M9 | 한국 휴장일 달력이 없습니다. KRX 공개 시각 계산(`_next_plain_weekday`)이 주말만 건너뜁니다 | `timing.price_available_at` | 추정 (한국 공휴일 다음 날 08:00에 실제로 게시되는지 미확인) | **미해결.** 영향은 작지만 v0.5 학습 전에 보완을 권장합니다 |
+| M9 | 한국 휴장일 달력이 없습니다 | `timing.price_available_at` | 추정 | **분석 후 유지.** 관측 달력은 `krx_calendar`로 쌓입니다. 공개 시각 영향은 교차시장 피처의 보수성 수준이라 반영하지 않았습니다(ROADMAP 0.5-B) |
 | M10 | 스키마 버전이 없어 마이그레이션을 추적할 수 없었습니다 | `store.py` | 확인 | 수정됨(`PRAGMA user_version = 2`) |
 | M11 | 수정한 LLM 검증이 보수적이라, 한 문장에 두 시장을 함께 언급한 정상 문장도 거부합니다 | `briefing.validate_llm` | 확인 (의도된 트레이드오프) | 유지. 이 경우 규칙 기반 문장으로 대체합니다 |
 
@@ -136,7 +136,7 @@ C1과 C2는 코드 버그가 아닙니다. FRED 약관과 기존 동작(원칙 6
 | L2 | `.playwright/`와 `.claude/*.lock`이 gitignore에 없었습니다 | `.gitignore` | 수정됨 |
 | L3 | cron 예시에 문제가 있었습니다: Debian cron은 `CRON_TZ`를 무시하고, cron 환경에 `KRX_API_KEY`가 전달되지 않고, 16:30에는 KRX 당일 값이 아직 없을 수 있습니다 | `schedule.example.cron` | 수정됨. 환경 파일 `~/.config/mi/env`를 읽는 `cron_run.sh`를 추가했습니다 |
 | L4 | `write()` 출력 문구의 연산자 우선순위 버그 | `mi_cli.write` | 수정됨 |
-| L5 | `vs_best_baseline` 패널이 브라우저에서 한 번도 렌더링되지 않았습니다(실제 성능 데이터 없음) | `intel.js` | **미검증.** 정적 검사만 통과했습니다 |
+| L5 | `vs_best_baseline` 패널이 브라우저에서 한 번도 렌더링되지 않았습니다 | `intel.js` | **확인됨(2026-10-15).** 합성 라이선스 픽스처로 학습·예측을 채운 화면에서 렌더링을 확인했습니다. 긴 CI 문구가 잘리던 문제(`td.wrap`)도 고쳤습니다 |
 | L6 | scikit-learn 1.10부터 `LogisticRegression(C=…)`가 deprecated입니다 | `models.LogReg` | `scikit-learn<1.10`으로 고정해 완화했습니다. 업그레이드할 때 다시 확인해야 합니다 |
 | L7 | KRX 수집이 하루당 1회씩 순차 호출하며, 호출 사이 지연이 없습니다 | `providers.krx` | 현재 한도 안에서는 문제없습니다(§3.4). 장기 백필을 할 때 보완이 필요합니다 |
 

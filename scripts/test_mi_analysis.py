@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import briefing, daily, events, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import backfill, briefing, daily, events, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -608,7 +608,7 @@ class StorageTest(unittest.TestCase):
             with store.connect(db) as conn:
                 self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], store.SCHEMA_VERSION)
                 rep = store.storage_report(conn)
-            backups = list((Path(tmp) / 'backups').glob('mi-*-pre-v3.sqlite'))
+            backups = list((Path(tmp) / 'backups').glob('mi-*-pre-v%d.sqlite' % store.SCHEMA_VERSION))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             self.assertEqual(rep['integrity'], 'ok')
@@ -617,6 +617,72 @@ class StorageTest(unittest.TestCase):
             with store.connect(db) as conn:                      # already current: no second backup
                 store.backup(conn)
             self.assertEqual(len(list((Path(tmp) / 'backups').glob('*.sqlite'))), 2)
+
+
+class BackfillTest(unittest.TestCase):
+    NOW = datetime(2026, 10, 15, 3, 0, tzinfo=timezone.utc)      # 12:00 KST Thursday
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / 'mi.sqlite'
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fetch(self, holidays=(), fail_on=None):
+        def f(cfg, d):
+            self.calls.append((cfg['symbol'], d))
+            if d == fail_on:
+                raise RuntimeError('데이터 요청 실패 (HTTP 401) · 인증키 유효성 확인')
+            return None if d in holidays else {'date': d.isoformat(), 'close': 2500.0 + d.toordinal() % 97}
+        return f
+
+    def run_(self, conn, **kw):
+        kw.setdefault('fetch', self.fetch())
+        return backfill.run(conn, kw.pop('start', date(2026, 9, 28)), kw.pop('markets', ('ks',)), sleep=lambda s: None,
+                            now=self.NOW, log=lambda *a: None, **kw)
+
+    def test_weekdays_up_to_yesterday_and_resume(self):
+        with store.connect(self.db) as conn:
+            rep = self.run_(conn, fetch=self.fetch(holidays={date(2026, 10, 3), date(2026, 10, 9)}))
+            days = [d for _, d in self.calls]
+            self.assertTrue(all(d.weekday() < 5 for d in days))
+            self.assertEqual(max(days), date(2026, 10, 14))              # never today: published next morning
+            self.assertEqual(rep['markets']['ks']['no_data'], 1)          # 10-09 Hangul Day (10-03 is a Saturday)
+            self.assertEqual(rep['markets']['ks']['remaining'], 1)        # recent no-data day is asked again later
+            self.calls.clear()
+            again = self.run_(conn)
+            self.assertEqual([d for _, d in self.calls], [date(2026, 10, 9)])
+            self.assertEqual(again['markets']['ks']['stored'], 1)
+            self.assertEqual(backfill.coverage(conn, 'ks')['rows'], 13)
+
+    def test_old_holiday_is_not_asked_again(self):
+        with store.connect(self.db) as conn:
+            self.run_(conn, start=date(2026, 9, 1), fetch=self.fetch(holidays={date(2026, 9, 24)}))
+            self.calls.clear()
+            self.run_(conn, start=date(2026, 9, 1))
+            self.assertEqual(self.calls, [])
+            cal = dict(conn.execute("SELECT date, status FROM krx_calendar WHERE market='ks'").fetchall())
+            self.assertEqual(cal['2026-09-24'], 'no_data')
+
+    def test_daily_budget_is_shared_across_runs(self):
+        with store.connect(self.db) as conn:
+            rep = self.run_(conn, max_calls=5)
+            self.assertEqual(rep['calls'], 5)
+            self.assertIn('budget', rep['stopped'])
+            with patch.object(backfill, 'DAILY_BUDGET', 7):
+                rep = self.run_(conn)
+            self.assertEqual(rep['calls'], 2)                              # 5 used earlier today
+            self.assertEqual(backfill.calls_today(conn, backfill.kst_today(self.NOW)), 7)
+
+    def test_provider_error_stops_and_keeps_progress(self):
+        with store.connect(self.db) as conn:
+            rep = self.run_(conn, markets=('ks', 'kq'), fetch=self.fetch(fail_on=date(2026, 10, 1)))
+            self.assertIn('HTTP 401', rep['stopped'])
+            self.assertEqual(backfill.coverage(conn, 'ks')['rows'], 3)    # 09-28..09-30 kept
+            self.assertNotIn('kq', rep['markets'])                        # stopped before the next market
+        self.assertNotIn('secret', rep['stopped'])
 
 
 class JobLogTest(unittest.TestCase):

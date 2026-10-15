@@ -9,6 +9,7 @@
   briefing   v0.8 Korean daily briefing             -> data/dashboard/briefing.json
   status     system status (+ SQLite integrity)     -> data/dashboard/status.json
   backup     online copy of data/mi.sqlite         -> data/backups/ (never deletes old copies)
+  backfill   KRX KOSPI/KOSDAQ history -> archive   (resumable, rate-limited; needs KRX_API_KEY)
   morning | evening | weekly | all   composite jobs (see README schedule)
 """
 import argparse
@@ -23,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer from v0.2)
-from mi import VERSION, briefing, daily, events, forecasting, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, backfill, briefing, daily, events, forecasting, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
 FRED_RISK_TTL = timedelta(days=3)   # display-only FRED snapshot: ignored and removed once older than this
@@ -130,7 +131,9 @@ def cmd_train(args):
         write('performance.json', perf)
         trained = [m for m, hs in perf['markets'].items() if any(v.get('status') == 'ok' for v in hs.values())]
         res['status'] = 'ok' if trained else 'unavailable'
-        res['message'] = 'trained: %s' % (','.join(trained) or 'none (licence gate)')
+        why = {m: sorted({v.get('status') for v in hs.values()}) for m, hs in perf['markets'].items() if m not in trained}
+        res['message'] = 'trained: %s%s' % (','.join(trained) or 'none', ''.join(
+            '; %s %s' % (m, '/'.join(st)) for m, st in why.items()))
         print(res['message'])
 
 
@@ -270,6 +273,26 @@ def cmd_status(args):
     write('status.json', status)
 
 
+def cmd_backfill(args):
+    """KRX history into the archive. Needs KRX_API_KEY. Resumable; safe to run again daily until complete."""
+    start = args.since or backfill.default_start()
+    with store.job('backfill') as res, store.connect() as conn:
+        if not os.environ.get('KRX_API_KEY', '').strip():
+            raise RuntimeError('KRX_API_KEY 없음 · ~/.config/mi/env에 키를 넣으세요 (README "KRX API 키")')
+        markets = [m for m in (args.markets or ['ks', 'kq']) if m in backfill.CODES]
+        rep = backfill.run(conn, start, markets, end=args.until, max_calls=args.max_calls)
+        rep['coverage'] = {m: backfill.coverage(conn, m) for m in markets}
+        conn.commit()
+        res['status'] = 'ok' if not rep['stopped'] else ('partial' if 'budget' in rep['stopped'] else 'failed')
+        res['message'] = 'calls %d; %s%s' % (rep['calls'], ', '.join(
+            '%s +%d (remaining %d)' % (m, r['stored'], r.get('remaining', r['pending'])) for m, r in rep['markets'].items()),
+            ('; stopped: ' + rep['stopped']) if rep['stopped'] else '')
+        write('backfill.json', dict(rep, generated_at=store.now_utc()))
+        print(res['message'])
+        if res['status'] == 'failed':
+            raise RuntimeError(rep['stopped'])
+
+
 def cmd_backup(args):
     with store.connect() as conn:
         dest = store.backup(conn)
@@ -303,7 +326,8 @@ def run_all(names, args):
 
 
 COMMANDS = {'ingest': cmd_ingest, 'regime': cmd_regime, 'train': cmd_train, 'forecast': cmd_forecast,
-            'news': cmd_news, 'briefing': cmd_briefing, 'status': cmd_status, 'backup': cmd_backup}
+            'news': cmd_news, 'briefing': cmd_briefing, 'status': cmd_status, 'backup': cmd_backup,
+            'backfill': cmd_backfill}
 COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'evening': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'weekly': ['ingest', 'regime', 'train', 'forecast'],
@@ -349,6 +373,9 @@ def main(argv=None):
     p.add_argument('--llm', action='store_true', help='briefing: paid Claude API rewrite of the summary (needs key)')
     p.add_argument('--session', choices=['morning', 'evening'])
     p.add_argument('--bootstrap', type=int, help='train: bootstrap replicates (default 500)')
+    p.add_argument('--since', type=date.fromisoformat, help='backfill: first date (default: Jan 2, ten years ago)')
+    p.add_argument('--until', type=date.fromisoformat, help='backfill: last date (default: yesterday KST)')
+    p.add_argument('--max-calls', type=int, help='backfill: call cap for this run (default: remaining daily budget)')
     args = p.parse_args(argv)
     load_env_file()   # names only are ever printed; values stay in this process and its children
     paths.DASHBOARD.mkdir(parents=True, exist_ok=True)

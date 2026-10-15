@@ -43,6 +43,16 @@ FAST_GRID = {'class_frequency': [{}], 'momentum_rule': [{}], 'logistic_regressio
              'lightgbm': [{'num_leaves': 4, 'n_estimators': 60}]}
 
 
+class AsofResolutionTest(unittest.TestCase):
+    def test_mixed_resolution_and_empty_inputs(self):
+        # found on real data: an empty market gives [s] decision stamps while macro stamps are [us]
+        empty = timing.decision_times('ks', [])
+        avail = pd.DatetimeIndex(['2026-10-01T21:00:00.123456Z']).astype('datetime64[us, UTC]')
+        self.assertEqual(len(timing.asof_join(empty, [date(2026, 10, 1)], avail, np.array([4.1]), 'x')), 0)
+        dec = pd.DatetimeIndex(['2026-10-02T21:00:00Z']).astype('datetime64[s, UTC]')
+        self.assertEqual(list(timing.asof_join(dec, [date(2026, 10, 1)], avail, np.array([4.1]), 'x')), [4.1])
+
+
 class GateTest(unittest.TestCase):
     def test_fred_and_unknown_sources_refused(self):
         for sid in ('fred_sp500', 'fred_nasdaq100', 'fred_vixcls', 'nope'):
