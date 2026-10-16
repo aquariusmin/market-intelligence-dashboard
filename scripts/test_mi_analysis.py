@@ -531,6 +531,14 @@ class EventsBriefingTest(unittest.TestCase):
                 self.assertEqual(conn.execute('SELECT COUNT(*) FROM llm_usage').fetchone()[0], 2)
         self.assertEqual(briefing.llm_cost('unknown-model', 1e6, 0), max(p[0] for p in briefing.LLM_PRICES.values()))
 
+        class AuthFail(Fake):
+            def create(self, **kw):
+                err = RuntimeError("Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error'}}")
+                err.status_code = 401
+                raise err
+        _, status = briefing.llm_rewrite(b, AuthFail())
+        self.assertEqual(status, 'fallback: HTTP 401 인증 실패 · ANTHROPIC_API_KEY 확인')
+
 
 class DartTest(unittest.TestCase):
     OK = json.dumps({'status': '000', 'list': [
@@ -542,7 +550,8 @@ class DartTest(unittest.TestCase):
         rows = dart.parse(self.OK, 'ks')
         self.assertEqual(len(rows), 1)                      # malformed row dropped
         self.assertEqual(rows[0]['url'], dart.VIEWER + '20261015000123')
-        self.assertEqual((rows[0]['date'], rows[0]['market']), ('2026-10-15', 'ks'))
+        self.assertEqual((rows[0]['date'], rows[0]['market'], rows[0]['kind']), ('2026-10-15', 'ks', '자기주식취득'))
+        self.assertEqual(dart.kind('[첨부정정]주요사항보고서(회사합병결정)'), '회사합병')
         self.assertEqual(dart.parse('{"status": "013", "message": "no data"}', 'kq'), [])
         with self.assertRaises(ValueError):
             dart.parse('{"status": "020", "message": "limit"}', 'ks')
@@ -564,6 +573,9 @@ class DartTest(unittest.TestCase):
         self.assertNotIn('SECRETKEY123', rep['error'])
         self.assertIn('bgn_de=20261013', seen[0])
         self.assertIn('pblntf_ty=B', seen[0])
+        many = json.dumps(dict(json.loads(self.OK), total_count=250))
+        with patch.dict('os.environ', {'DART_API_KEY': 'k'}):
+            self.assertEqual(dart.collect(request=lambda u: many)['truncated'], ['ks 250건 중 최신 100건', 'kq 250건 중 최신 100건'])
 
 
 class DailyTest(unittest.TestCase):

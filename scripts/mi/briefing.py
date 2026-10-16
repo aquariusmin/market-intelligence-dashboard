@@ -322,7 +322,7 @@ def llm_rewrite(brief, client=None, facts_brief=None, ledger=None):
             obj = validate_llm(json.loads(text[text.find('{'): text.rfind('}') + 1]), facts)
             status = 'ok'
     except Exception as exc:  # any failure -> keep the rule-based text
-        status = 'fallback: %s' % str(exc)[:200]
+        status = 'fallback: %s' % _short_error(exc)
     cost = _record(ledger, resp, status)
     if cost is not None:
         status += ' · $%.4f (이번 달 $%.2f / $%.2f)' % (cost, spent + cost, budget)
@@ -332,6 +332,15 @@ def llm_rewrite(brief, client=None, facts_brief=None, ledger=None):
     out['sections']['executive_summary'] = obj['executive_summary']
     out['method'] = 'rule-based-v1 + llm-summary (%s)' % LLM_MODEL
     return out, status
+
+
+def _short_error(exc):
+    """One readable line instead of the SDK's JSON body (keeps status cards narrow; no key material either way)."""
+    code = getattr(exc, 'status_code', None)
+    hint = {401: '인증 실패 · ANTHROPIC_API_KEY 확인', 403: '권한 없음', 429: '호출 한도 초과', 529: '서버 과부하'}
+    if code:
+        return 'HTTP %s %s' % (code, hint.get(code, type(exc).__name__))
+    return ('%s: %s' % (type(exc).__name__, exc))[:160]
 
 
 def _record(ledger, resp, status):
