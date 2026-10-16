@@ -53,6 +53,8 @@ export TOSS_CLIENT_ID=...         # 토스증권 Open API (당일 종가, SPY/QQ
 export TOSS_CLIENT_SECRET=...
 export ECOS_API_KEY=...           # 선택: 한국은행 ECOS (기준금리·국고채 3년 참고 지표, 무료)
 export DART_API_KEY=...           # 선택: OpenDART (주요사항보고서 목록, 무료)
+export MI_PUBLISH_URL=https://www.abovemin.com/api/lab/markets/ingest   # 선택: 웹 버전
+export MI_PUBLISH_TOKEN=...       # 선택: 사이트 Vercel의 MI_PUBLISH_TOKEN과 같은 값 (32자 이상)
 export ANTHROPIC_API_KEY=...      # 선택: AI 요약 (briefing --llm, 유료 · 월 예산 상한 있음)
 EOF
 chmod 600 ~/.config/mi/env
@@ -103,6 +105,18 @@ chmod 600 ~/.config/mi/env
 - **성능 탭:** holdout 지표, 기준 모델 비교, 보정 차트, 혼동행렬, **비용 반영 성과**, 실시간 예측 성과·기록, 데이터 권한 표
 
 모든 패널에 출처와 기준 시각이 있습니다. 파일이 없거나 형식이 깨지면 그 패널만 "파일 없음 / 형식 오류"로 표시합니다.
+
+### 웹 버전 (abovemin.com/lab/markets, 본인 전용)
+
+같은 결과를 사이트에서 볼 수 있습니다(개요 · 뉴스·공시 · 모델 검증 · 운영 상태). 화면 코드는 abovemin 저장소에 있고, 이 저장소는 데이터만 보냅니다.
+
+- **`mi_cli.py publish`:** morning·evening·weekly의 마지막 단계입니다. `MI_PUBLISH_URL`·`MI_PUBLISH_TOKEN`이 없으면 묶음만 만들어 점검하고 올리지 않습니다(`--dry-run`과 같음, 실패로 치지 않음). `--out DIR`은 로컬 파일로 씁니다(사이트 화면 검토용).
+- **올라가는 것(`scripts/mi/publish.py`):** 저장이 허용된 출처만 올립니다.
+  - KOSPI·KOSDAQ: KRX(+토스 잠정치)
+  - S&P 500·NASDAQ 100: FRED 저장 금지라 **SPY·QQQ(토스)** 가격으로 다시 계산한 국면·지표를 올리고 "SPY 기준"으로 표시합니다.
+  - 국면은 보관된 Fed 거시 데이터만으로 다시 계산하고(옵트인 FRED 위험 지표 제외), 브리핑은 SQLite에 보관한 제한 사본을 씁니다.
+  - FRED 출처가 섞이면 업로드를 거부합니다(`publish.check`).
+- **보안:** PC에는 Supabase service-role 키가 없습니다. 업로드 토큰은 사이트의 업로드 API 하나만 부를 수 있고, 사이트가 비공개 버킷에 씁니다. 페이지는 관리자 로그인 시에만 보이고 그 밖에는 404입니다.
 
 ---
 
