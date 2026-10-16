@@ -98,7 +98,9 @@ def train(conn, markets=None, horizons=dataset.HORIZONS, cfg_overrides=None, man
                 if 'lightgbm' in res['chosen']:
                     entry['lightgbm_importance'] = _importance(ds, res, cfg)
                 pidx, pproba, _, _ = res['predictions'][res['primary_model']]
-                entry['economics'] = economics.report(ds['close'].to_numpy(), pidx, pproba, h, m)
+                o = prices.target_opens(conn, m, targets[m])
+                opens = None if not o else np.array([o.get(d.date().isoformat(), np.nan) for d in ds['close'].index])
+                entry['economics'] = economics.report(ds['close'].to_numpy(), pidx, pproba, h, m, opens=opens)
                 _store_backtest(conn, run_id, m, h, ds, res, entry)
             perf['markets'][m][str(h)] = entry
         conn.commit()  # release the write lock between markets; each market's rows are self-contained

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import backfill, briefing, daily, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import backfill, briefing, daily, dart, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -352,7 +352,18 @@ class EventsBriefingTest(unittest.TestCase):
         def boom(u): raise RuntimeError('offline')
         down = events.upcoming(date(2026, 10, 15), request=boom)
         self.assertEqual(down['status']['fomc'], 'failed')
-        self.assertEqual(down['items'], [])
+        self.assertEqual([e['source'] for e in down['items'] if 'Federal Reserve' in e['source']], [])   # no FOMC invented
+
+    def test_bok_meetings_are_listed_and_missing_year_is_flagged(self):
+        up = events.upcoming(date(2026, 10, 15), request=lambda u: self.HTML)
+        self.assertEqual(up['next_bok']['date'], '2026-10-22')
+        self.assertEqual([e['date'] for e in up['items']], ['2026-10-22', '2026-10-28', '2026-11-26'])
+        self.assertEqual(up['status']['bok_mpc'], 'ok')
+        late = events.upcoming(date(2026, 12, 1), request=lambda u: self.HTML)
+        self.assertIsNone(late['next_bok'])
+        self.assertEqual(late['status']['bok_mpc'], 'not_registered')
+        self.assertIn('2027년', late['status']['bok_error'])
+        self.assertTrue(all(d.startswith('%d-' % y) for y, ds in events.BOK_MPC.items() for d in ds))
 
     def test_fomc_meeting_spanning_year_end(self):
         html = ('<h4>2026 FOMC Meetings</h4><div class="fomc-meeting__month"><strong>December</strong></div>'
@@ -479,6 +490,92 @@ class EventsBriefingTest(unittest.TestCase):
         briefing.llm_rewrite(b, spy, facts_brief=facts)
         self.assertIn('REDACTED VIEW', spy.seen)   # the model sees the restricted copy, not the display copy
         self.assertNotIn(b['sections']['us_overview'][0], spy.seen)
+
+
+    def test_llm_monthly_budget_blocks_and_records_usage(self):
+        b = self.brief()
+        good_text = '분석 가능한 시장의 국면과 위험 수준을 요약했습니다. 방향 확률은 검증된 정량 모델에서만 제공됩니다.'
+
+        class Fake:
+            calls = 0
+            beta = messages = None
+            def __init__(self):
+                self.beta = self.messages = self
+            def create(self, **kw):
+                Fake.calls += 1
+                block = type('B', (), {'type': 'text', 'text': json.dumps({'executive_summary': good_text}, ensure_ascii=False)})
+                usage = type('U', (), {'input_tokens': 2000, 'output_tokens': 1000})
+                return type('R', (), {'stop_reason': 'end_turn', 'content': [block], 'usage': usage,
+                                      'model': 'claude-opus-5-5'})
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                now = datetime(2026, 10, 16, 0, 0, tzinfo=timezone.utc)
+                ledger = store.LlmLedger(conn, now)
+                out, status = briefing.llm_rewrite(b, Fake(), ledger=ledger)
+                self.assertTrue(status.startswith('ok · $0.0280'), status)   # 2000×$4/M + 1000×$20/M
+                self.assertAlmostEqual(ledger.spent(), 0.028)
+                self.assertEqual(out['sections']['executive_summary'], good_text)
+                with patch.dict('os.environ', {'MI_LLM_BUDGET_USD': '0.05'}):
+                    _, status = briefing.llm_rewrite(b, Fake(), ledger=ledger)   # 0.028 + worst case > 0.05
+                self.assertTrue(status.startswith('skipped: 월 예산'), status)
+                self.assertEqual(Fake.calls, 1)
+                self.assertEqual(store.LlmLedger(conn, datetime(2026, 11, 1, tzinfo=timezone.utc)).spent(), 0)
+                # a rejected output was still billed: it is booked too
+                class Bad(Fake):
+                    def create(self, **kw):
+                        r = super().create(**kw)
+                        r.content[0].text = '{"executive_summary": "S&P 500 상승 확률 87%. 강력 매수."}'
+                        return r
+                _, status = briefing.llm_rewrite(b, Bad(), ledger=ledger)
+                self.assertTrue(status.startswith('fallback'), status)
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM llm_usage').fetchone()[0], 2)
+        self.assertEqual(briefing.llm_cost('unknown-model', 1e6, 0), max(p[0] for p in briefing.LLM_PRICES.values()))
+
+        class AuthFail(Fake):
+            def create(self, **kw):
+                err = RuntimeError("Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error'}}")
+                err.status_code = 401
+                raise err
+        _, status = briefing.llm_rewrite(b, AuthFail())
+        self.assertEqual(status, 'fallback: HTTP 401 인증 실패 · ANTHROPIC_API_KEY 확인')
+
+
+class DartTest(unittest.TestCase):
+    OK = json.dumps({'status': '000', 'list': [
+        {'corp_cls': 'Y', 'corp_name': '삼성전자', 'stock_code': '005930', 'report_nm': '주요사항보고서(자기주식취득결정)',
+         'rcept_no': '20261015000123', 'rcept_dt': '20261015'},
+        {'corp_cls': 'Y', 'corp_name': '', 'report_nm': 'x', 'rcept_no': 'bad', 'rcept_dt': '2026'}]}, ensure_ascii=False)
+
+    def test_parse_statuses(self):
+        rows = dart.parse(self.OK, 'ks')
+        self.assertEqual(len(rows), 1)                      # malformed row dropped
+        self.assertEqual(rows[0]['url'], dart.VIEWER + '20261015000123')
+        self.assertEqual((rows[0]['date'], rows[0]['market'], rows[0]['kind']), ('2026-10-15', 'ks', '자기주식취득'))
+        self.assertEqual(dart.kind('[첨부정정]주요사항보고서(회사합병결정)'), '회사합병')
+        self.assertEqual(dart.parse('{"status": "013", "message": "no data"}', 'kq'), [])
+        with self.assertRaises(ValueError):
+            dart.parse('{"status": "020", "message": "limit"}', 'ks')
+        with self.assertRaises(ValueError):
+            dart.parse('<html>error</html>', 'ks')
+
+    def test_collect_isolates_markets_and_hides_key(self):
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(dart.collect(request=lambda u: self.OK)['status'], 'unavailable')
+        seen = []
+        def req(url):
+            seen.append(url)
+            if 'corp_cls=K' in url:
+                raise RuntimeError('timeout for ' + url)
+            return self.OK
+        with patch.dict('os.environ', {'DART_API_KEY': 'SECRETKEY123'}):
+            rep = dart.collect(request=req, now=datetime(2026, 10, 16, 1, 0, tzinfo=timezone.utc))
+        self.assertEqual((rep['status'], len(rep['items'])), ('partial', 1))
+        self.assertNotIn('SECRETKEY123', rep['error'])
+        self.assertIn('bgn_de=20261013', seen[0])
+        self.assertIn('pblntf_ty=B', seen[0])
+        many = json.dumps(dict(json.loads(self.OK), total_count=250))
+        with patch.dict('os.environ', {'DART_API_KEY': 'k'}):
+            self.assertEqual(dart.collect(request=lambda u: many)['truncated'], ['ks 250건 중 최신 100건', 'kq 250건 중 최신 100건'])
 
 
 class DailyTest(unittest.TestCase):
@@ -889,6 +986,71 @@ class TossTest(unittest.TestCase):
                 self.assertEqual(prices.target_series(conn, 'ks', {'schema_version': 1, 'markets': {}}, {})['source_id'],
                                  'krx_openapi')
                 self.assertTrue(licenses.ml_allowed('toss_etf')[0])
+
+    def test_sync_stores_opens_history_once_then_recent_and_records_revisions(self):
+        calls = []
+        class Fake:
+            open_kospi = 5653.99
+            def daily(self, symbol, since=None, index=False):
+                calls.append((symbol, since))
+                if symbol == 'KOSPI':
+                    return [{'date': '2016-01-04', 'close': 1918.76, 'open': 1954.47},
+                            {'date': '2026-10-15', 'close': 5554.22, 'open': self.open_kospi}]
+                return [{'date': '2026-10-15', 'close': 701.0, 'open': None}]   # no open: nothing stored
+        now = datetime(2026, 10, 15, 23, 0, tzinfo=timezone.utc)
+        fake = Fake()
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertEqual(dict(calls)['KOSPI'], toss.HISTORY_START)   # first run: full open history
+                self.assertEqual(store.load_opens(conn, 'ks', 'toss_openapi'),
+                                 {'2016-01-04': 1954.47, '2026-10-15': 5653.99})
+                # index closes stay recent-only: the 2016 Toss close is not archived (KRX is the record)
+                self.assertEqual([r['date'] for r in store.load_prices(conn, 'ks', 'toss_openapi')], ['2026-10-15'])
+                self.assertEqual(store.load_opens(conn, 'sp', 'toss_etf'), {})
+                calls.clear()
+                fake.open_kospi = 5650.0
+                toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertEqual(dict(calls)['KOSPI'], date(2026, 10, 1))   # later runs: recent window only
+                rev = conn.execute("SELECT kind, old_value, new_value FROM observation_revisions WHERE kind='open'").fetchall()
+                self.assertEqual([tuple(r) for r in rev], [('open', 5653.99, 5650.0)])
+                t = prices.target_series(conn, 'ks', {'schema_version': 1, 'markets': {}}, {})
+                self.assertEqual(prices.target_opens(conn, 'ks', t)['2026-10-15'], 5650.0)
+                self.assertIsNone(prices.target_opens(conn, 'ks', {'source_id': 'licensed:ks'}))
+
+    def test_split_rescaled_etf_history_is_reread_in_full(self):
+        days = ['2016-01-04', '2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08']
+        calls = []
+        class Fake:
+            factor, fix = 1.0, {}
+            def daily(self, symbol, since=None, index=False):
+                calls.append((symbol, since))
+                if index:
+                    return []
+                return [{'date': d, 'close': self.fix.get(d, 400.0 + i) * self.factor, 'open': 399.0 * self.factor}
+                        for i, d in enumerate(days) if d >= since.isoformat()]
+        now = datetime(2026, 10, 9, 23, 0, tzinfo=timezone.utc)
+        fake = Fake()
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                toss.sync(conn, fake, now=now, log=lambda *a: None)
+                fake.fix = {'2026-10-07': 402.5}            # one-day correction: not a rescale, window only
+                calls.clear()
+                rep = toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertIsNone(rep['markets']['sp']['rebased'])
+                self.assertNotIn(('SPY', toss.HISTORY_START), calls)
+                fake.fix, fake.factor = {'2026-10-07': 402.5}, 0.25   # 4-for-1 split rescales everything
+                calls.clear()
+                rep = toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertAlmostEqual(rep['markets']['sp']['rebased'], 0.25)
+                self.assertIn(('SPY', toss.HISTORY_START), calls)
+                closes = {r['date']: r['close'] for r in store.load_prices(conn, 'sp', 'toss_etf')}
+                self.assertEqual(closes['2016-01-04'], 100.0)      # the old row follows the new basis
+                self.assertEqual(store.load_opens(conn, 'sp', 'toss_etf')['2016-01-04'], 99.75)
+                n = conn.execute("SELECT COUNT(*) FROM observation_revisions WHERE key='sp' AND kind='price' "
+                                 "AND date='2016-01-04'").fetchone()[0]
+                self.assertEqual(n, 1)                                 # old value kept in the revision log
+        self.assertIsNone(toss.rebase_factor({'a': 1.0, 'b': 2.0}, [{'date': 'a', 'close': 0.5}, {'date': 'b', 'close': 1.0}]))
 
 
 class JobLogTest(unittest.TestCase):

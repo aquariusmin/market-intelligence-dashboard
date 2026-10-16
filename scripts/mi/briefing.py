@@ -18,6 +18,24 @@ REGIME_KO = {'Bullish / Low Volatility': '상승 추세 · 낮은 변동성', 'B
              'Bearish / Low Volatility': '하락 추세 · 낮은 변동성', 'Bearish / High Volatility': '하락 추세 · 높은 변동성',
              'Sideways / Neutral': '횡보 · 중립'}
 LLM_MODEL = 'claude-opus-5-5'
+LLM_MAX_TOKENS = 4000
+# USD per million tokens (input, output), Anthropic list prices read 2026-10-16. A fallback may serve another model;
+# unknown models are charged at the highest rate below so the budget check errs on the safe side.
+LLM_PRICES = {'claude-opus-5-5': (4.0, 20.0), 'claude-opus-5': (5.0, 25.0), 'claude-opus-4-8': (5.0, 25.0),
+              'claude-sonnet-5-5': (2.0, 10.0), 'claude-haiku-5-5': (0.10, 0.50)}
+LLM_MONTHLY_BUDGET_USD = 3.5   # ≈ 5,000원/월 (user's ceiling, 2026-10-16); MI_LLM_BUDGET_USD overrides
+
+
+def llm_cost(model, input_tokens, output_tokens):
+    p_in, p_out = LLM_PRICES.get(model, max(LLM_PRICES.values()))
+    return (input_tokens * p_in + output_tokens * p_out) / 1e6
+
+
+def llm_budget():
+    try:
+        return float(os.environ.get('MI_LLM_BUDGET_USD') or LLM_MONTHLY_BUDGET_USD)
+    except ValueError:
+        return LLM_MONTHLY_BUDGET_USD
 
 
 def _pct(v, d=2):
@@ -269,33 +287,70 @@ def validate_llm(text_obj, facts_text):
     return text_obj
 
 
-def llm_rewrite(brief, client=None, facts_brief=None):
+def llm_rewrite(brief, client=None, facts_brief=None, ledger=None):
     """Rewrite only the executive summary. Returns (brief, status). Never raises.
     `facts_brief` (default: `brief`) is what the model sees: pass the restricted build so numbers derived from
-    sources that may not be stored or redistributed never leave the machine."""
+    sources that may not be stored or redistributed never leave the machine.
+    `ledger` (store.LlmLedger): when given, the call is skipped if this month's spend plus a worst-case estimate of
+    this call would exceed the monthly budget, and the actual token usage is recorded after the call."""
     if client is None and not os.environ.get('ANTHROPIC_API_KEY'):
         return brief, 'skipped: ANTHROPIC_API_KEY 없음'
     facts = json.dumps({k: (facts_brief or brief)['sections'][k] for k in ('executive_summary', 'us_overview', 'korea_overview',
                                                            'bullish_factors', 'bearish_factors', 'market_forecast')},
                        ensure_ascii=False)
+    system = ('당신은 금융시장 브리핑 편집자입니다. 주어진 FACTS JSON의 내용만 사용해 한국어 요약 3~5문장을 작성하세요. '
+              '새로운 수치·확률·전망·사실을 추가하지 말고, 투자 권유를 하지 마세요. '
+              '출력은 {"executive_summary": "..."} 형태의 JSON 하나만 작성하세요.')
+    budget, spent = llm_budget(), (ledger.spent() if ledger else 0.0)
+    # worst case: one token per character of input (Korean is denser than that) and the full output allowance
+    worst = llm_cost(LLM_MODEL, len(facts) + len(system) + 200, LLM_MAX_TOKENS)
+    if ledger and spent + worst > budget:
+        return brief, 'skipped: 월 예산 $%.2f 중 $%.2f 사용 · 이번 호출 최대 $%.3f' % (budget, spent, worst)
+    resp = None
     try:
         if client is None:
             import anthropic  # optional dependency: pip install anthropic
             client = anthropic.Anthropic()
         resp = client.beta.messages.create(
-            model=LLM_MODEL, max_tokens=4000, output_config={'effort': 'low'},
+            model=LLM_MODEL, max_tokens=LLM_MAX_TOKENS, output_config={'effort': 'low'},
             betas=['server-side-fallback-2026-07-01'], fallbacks='default',
-            system=('당신은 금융시장 브리핑 편집자입니다. 주어진 FACTS JSON의 내용만 사용해 한국어 요약 3~5문장을 작성하세요. '
-                    '새로운 수치·확률·전망·사실을 추가하지 말고, 투자 권유를 하지 마세요. '
-                    '출력은 {"executive_summary": "..."} 형태의 JSON 하나만 작성하세요.'),
-            messages=[{'role': 'user', 'content': 'FACTS:\n' + facts}])
+            system=system, messages=[{'role': 'user', 'content': 'FACTS:\n' + facts}])
         if resp.stop_reason == 'refusal':
-            return brief, 'fallback: 모델 거절'
-        text = next((b.text for b in resp.content if b.type == 'text'), '')
-        obj = validate_llm(json.loads(text[text.find('{'): text.rfind('}') + 1]), facts)
+            status = 'fallback: 모델 거절'
+        else:
+            text = next((b.text for b in resp.content if b.type == 'text'), '')
+            obj = validate_llm(json.loads(text[text.find('{'): text.rfind('}') + 1]), facts)
+            status = 'ok'
     except Exception as exc:  # any failure -> keep the rule-based text
-        return brief, 'fallback: %s' % str(exc)[:200]
+        status = 'fallback: %s' % _short_error(exc)
+    cost = _record(ledger, resp, status)
+    if cost is not None:
+        status += ' · $%.4f (이번 달 $%.2f / $%.2f)' % (cost, spent + cost, budget)
+    if not status.startswith('ok'):
+        return brief, status
     out = json.loads(json.dumps(brief))
     out['sections']['executive_summary'] = obj['executive_summary']
     out['method'] = 'rule-based-v1 + llm-summary (%s)' % LLM_MODEL
-    return out, 'ok'
+    return out, status
+
+
+def _short_error(exc):
+    """One readable line instead of the SDK's JSON body (keeps status cards narrow; no key material either way)."""
+    code = getattr(exc, 'status_code', None)
+    hint = {401: '인증 실패 · ANTHROPIC_API_KEY 확인', 403: '권한 없음', 429: '호출 한도 초과', 529: '서버 과부하'}
+    if code:
+        return 'HTTP %s %s' % (code, hint.get(code, type(exc).__name__))
+    return ('%s: %s' % (type(exc).__name__, exc))[:160]
+
+
+def _record(ledger, resp, status):
+    """Book the tokens a response was billed for; returns the cost, or None when there was no response."""
+    usage = getattr(resp, 'usage', None)
+    if resp is None or usage is None:
+        return None
+    model = getattr(resp, 'model', None) or LLM_MODEL
+    tin, tout = int(getattr(usage, 'input_tokens', 0) or 0), int(getattr(usage, 'output_tokens', 0) or 0)
+    cost = llm_cost(model, tin, tout)
+    if ledger:
+        ledger.record(model, tin, tout, cost, status)
+    return cost

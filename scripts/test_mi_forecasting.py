@@ -84,6 +84,33 @@ class EconomicsTest(unittest.TestCase):
         flat = economics.evaluate(self.close, self.idx, self.proba_from([False] * len(self.idx)), 5, 'sp')
         self.assertEqual((flat['trades'], flat['strategy_total']), (0, 0.0))
 
+    def test_next_open_is_an_open_to_open_chain(self):
+        opens = self.close * np.exp(np.random.default_rng(5).normal(0, 0.004, len(self.close)))
+        h = 5
+        r = economics.evaluate(self.close, self.idx, self.proba_from([True] * len(self.idx)), h, 'kq', 1, opens=opens)
+        got = economics.periods(self.idx, h, len(self.close), 1)
+        # buy at open[i+1], sell at open[i+1+h]; consecutive periods chain, so holding is open[first] -> open[last]
+        self.assertAlmostEqual(r['buy_hold_total'], opens[got[-1] + 1 + h] / opens[got[0] + 1] - 1)
+        self.assertEqual((r['entry_price'], r['missing_periods']), ('open', 0))
+        with self.assertRaises(ValueError):
+            economics.evaluate(self.close, self.idx, self.proba_from([True] * len(self.idx)), h, 'kq', 0, opens=opens)
+
+    def test_missing_opens_are_counted_and_too_many_block_the_score(self):
+        h, got = 5, economics.periods(self.idx, 5, len(self.close), 1)
+        bull = self.proba_from([True] * len(self.idx))
+        few = self.close.copy()
+        few[got[3] + 1] = np.nan       # one open missing: exit of period 2 and entry of period 3, both left out
+        r = economics.evaluate(self.close, self.idx, bull, h, 'kq', 1, opens=few)
+        self.assertEqual((r['status'], r['missing_periods'], r['periods']), ('ok', 2, len(got) - 2))
+        many = self.close.copy()
+        many[[i + 1 for i in got[:len(got) // 10]]] = np.nan
+        r = economics.evaluate(self.close, self.idx, bull, h, 'kq', 1, opens=many)
+        self.assertEqual(r['status'], 'insufficient')
+        self.assertIn('시가 누락', r['reason'])
+        rep = economics.report(self.close, self.idx, bull, h, 'kq')
+        self.assertEqual(rep['next_open']['status'], 'unavailable')
+        self.assertEqual(set(rep), {'same_close', 'next_close', 'next_open'})
+
     def test_verdict_wording(self):
         self.assertEqual(economics.verdict({'excess_ci90': [0.001, 0.01], 'mean_excess_vs_hold': 0.005}), '비용 차감 후 우위')
         self.assertTrue(economics.verdict({'excess_ci90': [-0.002, 0.005], 'mean_excess_vs_hold': 0.002}).startswith('우위 근거 부족'))

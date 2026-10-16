@@ -109,6 +109,16 @@ def target_series(conn, market, snapshot=None, manifest=None):
     return series(conn, market, snapshot, manifest)
 
 
+OPEN_SOURCE = {'toss_etf': 'toss_etf', 'krx_openapi': 'toss_openapi'}   # target close source -> open source
+
+
+def target_opens(conn, market, target):
+    """Opening prices keyed by date for a target series, from the matching Toss feed; None if there is no such feed
+    (licensed CSV, FRED snapshot). Used only to score next-open entry after the fact, never as a feature."""
+    src = OPEN_SOURCE.get(target.get('source_id'))
+    return store.load_opens(conn, market, src) if src else None
+
+
 def series(conn, market, snapshot=None, manifest=None):
     """-> dict(rows, source_id, origin, status, error)."""
     manifest = licenses.licensed_manifest() if manifest is None else manifest

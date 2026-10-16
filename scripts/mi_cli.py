@@ -12,6 +12,7 @@
   backfill   KRX KOSPI/KOSDAQ history -> archive   (resumable, rate-limited; needs KRX_API_KEY)
   label-export / label-score   news headlines -> data/eval/news_labels.csv / accuracy -> nlp_eval.json
   morning | evening | weekly | all   composite jobs (see README schedule)
+  catchup    run the latest scheduled job missed while this computer was off (cron @reboot)
 """
 import argparse
 import json
@@ -19,13 +20,14 @@ import os
 import subprocess
 import sys
 import traceback
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer shared with the price collector)
-from mi import VERSION, backfill, briefing, daily, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, backfill, briefing, daily, dart, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi.timing import KST  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
 FRED_RISK_TTL = timedelta(days=3)   # display-only FRED snapshot: ignored and removed once older than this
@@ -86,14 +88,24 @@ def cmd_ingest(args):
                 except Exception as exc:
                     toss_rep = {'error': '%s: %s' % (type(exc).__name__, exc)}
                     traceback.print_exc()
+        ref_macro = None
+        if os.environ.get('ECOS_API_KEY', '').strip():
+            # display-only Korea rates (ECOS). FRED entries of that file are not fetched from cron: the engine keeps
+            # FRED out of storage, and FRED risk series are shown via the opt-in --with-fred-risk snapshot instead.
+            ref = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'collect_macro.py'), '--output',
+                                  str(paths.DATA / 'reference_only' / 'macro.json'), '--providers', 'ecos'])
+            ref_macro = {'exit': ref.returncode, 'providers': ['ecos']}
         if transient:
             write('fred_risk.json', {'note': '표시 전용 스냅샷 (보관 아님) · 사용자 옵트인 --with-fred-risk',
                                      'fetched_at': store.now_utc(), 'series': transient})
         elif OUT('fred_risk.json').exists() and not args.with_fred_risk:
             OUT('fred_risk.json').unlink()  # opt-in withdrawn: drop the display snapshot
         write('ingest.json', {'ran_at': store.now_utc(), 'price_collector_exit': code, 'archive': archived,
-                              'archive_error': archive_error, 'macro': results, 'toss': toss_rep})
+                              'archive_error': archive_error, 'macro': results, 'toss': toss_rep,
+                              'reference_macro': ref_macro})
         failed = [k for k, v in results.items() if v['status'] in ('stale', 'unavailable')]
+        if ref_macro and ref_macro['exit']:
+            failed.append('ecos')
         failed += ['toss:' + m for m, v in ((toss_rep or {}).get('markets') or {}).items() if v.get('status') != 'ok']
         if toss_rep and toss_rep.get('error'):
             failed.append('toss')
@@ -169,11 +181,14 @@ def cmd_news(args):
     with store.job('news') as res, store.connect() as conn:
         report = news.collect(conn, use_gdelt=not args.no_gdelt)
         items = news.recent(conn)
+        disclosures = dart.collect()
+        report['dart_openapi'] = {'status': disclosures['status'], 'items': len(disclosures['items']),
+                                  'error': disclosures['error'], 'storage': 'not_stored'}
         write('news.json', {'generated_at': store.now_utc(), 'report': report, 'items': items,
                             'sentiment_note': '영문 제목 키워드 휴리스틱(lexicon-en-v2) · 한국어 감성 미산출 · 참고용',
                             'model_licenses': licenses.MODELS,
                             'separation_note': '뉴스 분석은 예측 모델 입력으로 사용하지 않습니다.',
-                            'evaluation': nlp_eval.load_report()})
+                            'evaluation': nlp_eval.load_report(), 'disclosures': disclosures})
         failed = [k for k, v in report.items() if isinstance(v, dict) and v.get('status') == 'failed']
         res['status'] = 'ok' if not failed else 'partial'
         res['message'] = 'added %d; failed: %s' % (report['added'], ','.join(failed) or 'none')
@@ -238,12 +253,12 @@ def cmd_briefing(args):
                               restricted=restricted_markets(reg), macro_changes=macro_changes)
         llm_status = 'not requested'
         if args.llm:
-            brief, llm_status = briefing.llm_rewrite(brief, facts_brief=kept)
-            if llm_status == 'ok':
+            brief, llm_status = briefing.llm_rewrite(brief, facts_brief=kept, ledger=store.LlmLedger(conn, now))
+            if llm_status.startswith('ok'):
                 kept['sections']['executive_summary'] = brief['sections']['executive_summary']
                 kept['method'] = brief['method']
         for b in (brief, kept):
-            b.update(events_status=ev['status'], next_fomc=ev['next_fomc'], llm_status=llm_status,
+            b.update(events_status=ev['status'], next_fomc=ev['next_fomc'], next_bok=ev.get('next_bok'), llm_status=llm_status,
                      input_warnings=input_warnings(getattr(args, 'failed_stages', ())))
         conn.execute('INSERT INTO briefings (created_at, session, method, content) VALUES (?,?,?,?)',
                      (kept['generated_at'], kept['session'], kept['method'], store.dumps(kept)))
@@ -381,7 +396,61 @@ COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
              'all': ['ingest', 'regime', 'train', 'forecast', 'news', 'briefing']}
 
 
-SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET')
+# Mirrors scripts/schedule.example.cron (KST, weekday 0 = Monday). A slot counts as done when its marker stage
+# started at or after the slot time, so a manual run also satisfies it.
+SCHEDULE = {'morning': (time(8, 30), range(0, 6), 'ingest'),
+            'evening': (time(16, 30), range(0, 5), 'ingest'),
+            'weekly': (time(10, 0), (6,), 'train')}
+CATCHUP_SOON = timedelta(minutes=30)   # a daily slot this close ahead will refresh everything anyway
+
+
+def last_slot(job, now):
+    at, days, _ = SCHEDULE[job]
+    for back in range(8):
+        d = (now - timedelta(days=back)).date()
+        slot = datetime.combine(d, at, KST)
+        if d.weekday() in days and slot <= now:
+            return slot
+
+
+def next_slot(job, now):
+    at, days, _ = SCHEDULE[job]
+    for ahead in range(8):
+        d = (now + timedelta(days=ahead)).date()
+        slot = datetime.combine(d, at, KST)
+        if d.weekday() in days and slot > now:
+            return slot
+
+
+def missed_jobs(now=None):
+    """Composite jobs to replay after downtime: the weekly job if its last slot was missed, then the most recent
+    missed daily slot only (morning and evening run the same stages). Nothing daily if a daily slot is imminent."""
+    now = (now or datetime.now(timezone.utc)).astimezone(KST)
+    with store.connect() as conn:
+        def done(stage, slot):
+            return conn.execute('SELECT 1 FROM job_runs WHERE job=? AND started_at>=? LIMIT 1',
+                                (stage, slot.astimezone(timezone.utc).isoformat(timespec='seconds'))).fetchone()
+        missed = {j: last_slot(j, now) for j in SCHEDULE if not done(SCHEDULE[j][2], last_slot(j, now))}
+    jobs = ['weekly'] if 'weekly' in missed else []
+    daily = [j for j in ('morning', 'evening') if j in missed]
+    soon = min(next_slot(j, now) for j in ('morning', 'evening')) - now <= CATCHUP_SOON
+    if daily and not soon:
+        jobs.append(max(daily, key=missed.get))
+    return jobs
+
+
+def cmd_catchup(args):
+    jobs = missed_jobs()
+    print('catchup: %s' % (', '.join(jobs) if jobs else 'nothing missed'))
+    code = 0
+    for job in jobs:
+        print('=== %s (catch-up)' % job)
+        args.session = job if job in ('morning', 'evening') else None
+        code |= run_all(COMPOSITE[job], args)
+    return code
+
+
+SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET', 'ECOS_API_KEY', 'DART_API_KEY')
 
 
 def load_env_file(path=None):
@@ -411,7 +480,7 @@ def load_env_file(path=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('command', choices=list(COMMANDS) + list(COMPOSITE))
+    p.add_argument('command', choices=list(COMMANDS) + list(COMPOSITE) + ['catchup'])
     p.add_argument('--markets', nargs='+', choices=list(prices.MARKETS))
     p.add_argument('--skip-prices', action='store_true', help='ingest: macro only')
     p.add_argument('--with-fred-risk', action='store_true',
@@ -426,6 +495,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     load_env_file()   # names only are ever printed; values stay in this process and its children
     paths.DASHBOARD.mkdir(parents=True, exist_ok=True)
+    if args.command == 'catchup':
+        return cmd_catchup(args)
     if args.command in COMPOSITE:
         if args.command in ('morning', 'evening') and not args.session:
             args.session = args.command

@@ -415,7 +415,7 @@ function perfView() {
 function econCard(p) {
   const e = p?.economics;
   if (!isObj(e)) return '';
-  const label = {same_close: '당일 종가 진입', next_close: '하루 늦은 종가 진입 (시초가 진입의 보수적 대용)'};
+  const label = {same_close: '당일 종가 진입', next_open: '다음 거래일 시가 진입 → 시가 청산', next_close: '하루 늦은 종가 진입 (보수적)'};
   const rows = Object.entries(label).map(([k, title]) => {
     const r = e[k];
     if (!isObj(r) || r.status !== 'ok') return `<tr><td>${esc(title)}</td><td colspan="7" class="muted">${esc(r?.reason || '계산 불가')}</td></tr>`;
@@ -423,7 +423,7 @@ function econCard(p) {
     return `<tr><td class="wrap">${esc(title)}</td><td>${Number(r.periods) || 0} / ${Number(r.trades) || 0}</td><td>${pct(r.hit_rate, 0)}</td><td class="${direction(r.strategy_total)}">${pct(r.strategy_total, 1)}</td><td class="${direction(r.buy_hold_total)}">${pct(r.buy_hold_total, 1)}</td><td>${pct(r.strategy_max_drawdown, 1)} / ${pct(r.buy_hold_max_drawdown, 1)}</td><td>${sgn((r.mean_excess_vs_hold ?? NaN) * 100, 3, '%p')} [${sgn((ci[0] ?? NaN) * 100, 3)}, ${sgn((ci[1] ?? NaN) * 100, 3)}]</td><td class="wrap" style="min-width:160px">${pill(r.verdict, r.verdict === '비용 차감 후 우위' ? 'ok' : 'warn')}</td></tr>`;
   }).join('');
   const any = Object.values(e).find(r => isObj(r) && r.status === 'ok');
-  return `<div class="card" style="margin-top:18px"><div class="row sectionhead"><h2>비용 반영 성과 · 투자에 쓸 만한가</h2>${pill('HOLDOUT · 사전 고정 규칙', '')}</div><div class="tablewrap"><table><thead><tr><th>진입</th><th>기간 / 매수</th><th>적중률</th><th>전략 누적</th><th>단순 보유 누적</th><th>최대 낙폭 (전략 / 보유)</th><th>기간당 초과수익 [90% CI]</th><th>판정</th></tr></thead><tbody>${rows}</tbody></table></div><div class="note">규칙(2026-10-16 사전 고정): 주 모델이 '상승'을 가장 높게 보면 ${horizon()}거래일 보유, 아니면 현금 · 겹치지 않는 기간만 평가 · 왕복 비용 ${pct(any?.round_trip_cost, 2)} 차감 · 배당·세금·환전 미반영 · 단순 보유 대비 초과수익의 90% 하한이 0보다 클 때만 "비용 차감 후 우위"</div></div>`;
+  return `<div class="card" style="margin-top:18px"><div class="row sectionhead"><h2>비용 반영 성과 · 투자에 쓸 만한가</h2>${pill('HOLDOUT · 사전 고정 규칙', '')}</div><div class="tablewrap"><table><thead><tr><th>진입</th><th>기간 / 매수</th><th>적중률</th><th>전략 누적</th><th>단순 보유 누적</th><th>최대 낙폭 (전략 / 보유)</th><th>기간당 초과수익 [90% CI]</th><th>판정</th></tr></thead><tbody>${rows}</tbody></table></div><div class="note">규칙(2026-10-16 사전 고정): 주 모델이 '상승'을 가장 높게 보면 ${horizon()}거래일 보유, 아니면 현금 · 겹치지 않는 기간만 평가 · 왕복 비용 ${pct(any?.round_trip_cost, 2)} 차감 · 시가 진입은 다음 거래일 시가에 사고 ${horizon()}거래일 뒤 시가에 팔며(한국은 지수 시가 기준, ETF 시가와 약간 다름), 시가가 빠진 기간이 5%를 넘으면 계산하지 않음 · 배당·세금·환전 미반영 · 단순 보유 대비 초과수익의 90% 하한이 0보다 클 때만 "비용 차감 후 우위"</div></div>`;
 }
 // strongest baseline comparison (optional key; shown next to vs_class_frequency when present)
 function bestBase(b) {
@@ -479,7 +479,14 @@ function newsIntelView() {
   const sentLabel = {positive: '긍정', neutral: '중립', negative: '부정'};
   return intelHeading('News Intelligence', '공식 발표·뉴스 메타데이터 분석 (예측 모델과 분리)') + `<div class="card"><div class="row"><h2>News Sentiment</h2>${flags('news')}<span class="sub">${items.length}건 · 최근 14일 · ${genStamp(n)}</span></div>${scored ? `<div class="distribution">${counts.map((c, i) => `<span style="width:${c / scored * 100}%;background:${['var(--green)', 'var(--amber)', 'var(--red)'][i]}"></span>`).join('')}</div><div class="row"><span class="positive tiny">● 긍정 ${counts[0]}</span><span class="neutral tiny">● 중립 ${counts[1]}</span><span class="negative tiny">● 부정 ${counts[2]}</span></div>` : '<div class="sub" style="margin-top:12px">감성 점수 대상 없음</div>'}<div class="note">${esc(n.sentiment_note)} · ${esc(n.separation_note)}<br>${nlpEval(n.evaluation)}수집원: ${['fed_press_rss', 'sec_press_rss', 'gdelt_doc'].map(k => `${k} ${pill(rep[k]?.status || '—', statusKind(rep[k]?.status))}${rep[k]?.error ? ' <span class="tiny neutral">' + esc(rep[k].error) + '</span>' : ''}`).join(' · ')}<br>기사 본문은 저장하지 않습니다 (제목·URL·시각만). 원문은 링크로 확인하세요.</div></div>
   <div class="filters" aria-label="뉴스 카테고리">${cats.map(c => `<button class="filter ${state.newsCat === c ? 'active' : ''}" data-news-cat="${esc(c)}" aria-pressed="${state.newsCat === c}">${c === 'All' ? '전체' : esc(c)}</button>`).join('')}</div><div class="filters" aria-label="관련 시장" style="margin-top:-10px">${[['all', '전체 시장'], ['sp', 'S&P 500'], ['nq', 'NASDAQ 100'], ['ks', 'KOSPI'], ['kq', 'KOSDAQ']].map(([k, l]) => `<button class="filter ${state.newsMarket === k ? 'active' : ''}" data-news-market="${k}" aria-pressed="${state.newsMarket === k}">${l}</button>`).join('')}</div>
-  <div class="grid newsgrid">${items.slice(0, 60).map(i => `<article class="card news newsitem"><div class="row"><span class="label">${esc(i.category)}</span>${i.sentiment_label ? `<span class="badge ${tone(sentLabel[i.sentiment_label])}">${sentLabel[i.sentiment_label]}</span>` : '<span class="badge neutral">감성 미산출</span>'}</div><h3>${link(i.url, i.title)}</h3><div class="tiny muted">${esc(i.source)} · ${esc(stamp(i.published_at || i.collected_at))} · 중요도 ${i.importance}/5 · ${(i.related_markets || []).map(k => esc(markets[k]?.name || k)).join(', ')}</div><div class="tiny muted" style="margin-top:8px">${esc(i.provider)} · 감성 방법 ${esc(i.sentiment_method || '—')}</div></article>`).join('') || '<div class="card sub">조건에 맞는 뉴스가 없습니다.</div>'}</div>`;
+  <div class="grid newsgrid">${items.slice(0, 60).map(i => `<article class="card news newsitem"><div class="row"><span class="label">${esc(i.category)}</span>${i.sentiment_label ? `<span class="badge ${tone(sentLabel[i.sentiment_label])}">${sentLabel[i.sentiment_label]}</span>` : '<span class="badge neutral">감성 미산출</span>'}</div><h3>${link(i.url, i.title)}</h3><div class="tiny muted">${esc(i.source)} · ${esc(stamp(i.published_at || i.collected_at))} · 중요도 ${i.importance}/5 · ${(i.related_markets || []).map(k => esc(markets[k]?.name || k)).join(', ')}</div><div class="tiny muted" style="margin-top:8px">${esc(i.provider)} · 감성 방법 ${esc(i.sentiment_method || '—')}</div></article>`).join('') || '<div class="card sub">조건에 맞는 뉴스가 없습니다.</div>'}</div>` + disclosuresCard(n.disclosures);
+}
+// OpenDART major-matter reports (news.json.disclosures): latest list only, never archived
+function disclosuresCard(d) {
+  if (!isObj(d)) return '';
+  const list = Array.isArray(d.items) ? d.items.filter(i => state.newsMarket === 'all' || i.market === state.newsMarket) : [];
+  const rows = list.slice(0, 40).map(i => `<tr><td>${esc(i.date)}</td><td>${esc(markets[i.market]?.name || i.market)}</td><td class="wrap">${esc(i.company)}</td><td class="wrap">${link(i.url, i.report)}</td><td class="wrap">${esc(i.kind || '')}${i.amended ? ' <span class="tiny muted">정정</span>' : ''}</td></tr>`).join('');
+  return `<div class="card" style="margin-top:18px"><div class="row sectionhead"><h2>DART 주요 공시</h2>${pill(d.status || '—', statusKind(d.status))}</div><div class="sub">${esc(d.scope || '')} · ${list.length}건 · ${esc(stamp(d.fetched_at))}</div>${d.error ? `<div class="note neutral">${esc(d.error)}</div>` : ''}${Array.isArray(d.truncated) && d.truncated.length ? `<div class="note neutral">일부만 표시: ${d.truncated.map(esc).join(' · ')}</div>` : ''}${rows ? `<div class="tablewrap"><table><thead><tr><th>접수일</th><th>시장</th><th>회사</th><th>보고서</th><th>유형</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="sub" style="margin-top:10px">해당 기간 공시가 없거나 조회하지 못했습니다.</div>'}<div class="note">출처: ${esc(d.source || 'OpenDART')} · ${esc(d.storage || '')} · 회사별 공시이며 지수 전망에 쓰지 않습니다. 원문은 링크로 확인하세요.</div></div>`;
 }
 
 /* ---------- system status ---------- */
@@ -526,7 +533,7 @@ briefingCard = guard('Daily Market Brief', briefingCard); perfDetail = guard('Mo
 liveSummaryCard = guard('실시간 예측 성과', liveSummaryCard); liveHistoryTable = guard('Forecast History', liveHistoryTable);
 licenseTable = guard('Data Sources & Licences', licenseTable);
 referencePanel = guard('Reference Indicators', referencePanel); majorChanges = guard('Major Market Changes', majorChanges);
-newsIntelView = guard('News Intelligence', newsIntelView, true); statusView = guard('System Status', statusView, true);
+newsIntelView = guard('News Intelligence', newsIntelView, true); disclosuresCard = guard('DART 공시', disclosuresCard); statusView = guard('System Status', statusView, true);
 indicatorsView = guard('Market Indicators', indicatorsView, true);
 function realView() {
   applyLatest();   // idempotent: newer provisional closes win whichever loader finished last

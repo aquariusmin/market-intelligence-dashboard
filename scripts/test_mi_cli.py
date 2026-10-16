@@ -63,6 +63,38 @@ class CliTest(unittest.TestCase):
         self.assertEqual(ran, [['regime'], 'status'])   # briefing ran and knew regime had failed
         self.assertIn('Traceback', self.err.getvalue())
 
+    def test_catchup_replays_only_the_latest_missed_slot(self):
+        from mi import store
+        from mi.timing import KST
+        at = lambda *a: datetime(*a, tzinfo=KST)
+        def ran(stage, when):
+            with store.connect() as conn:
+                conn.execute("INSERT INTO job_runs (job, started_at, status) VALUES (?,?, 'ok')",
+                             (stage, when.astimezone(timezone.utc).isoformat(timespec='seconds')))
+        # Fri 2026-10-16 13:42 KST, machine off since 01:17: morning 08:30 missed; Sun weekly missed too
+        now = at(2026, 10, 16, 13, 42)
+        ran('ingest', at(2026, 10, 15, 16, 31))
+        self.assertEqual(mi_cli.missed_jobs(now), ['weekly', 'morning'])
+        ran('train', at(2026, 10, 11, 10, 5))
+        self.assertEqual(mi_cli.missed_jobs(now), ['morning'])
+        # morning and evening both missed: replay the later one once
+        self.assertEqual(mi_cli.missed_jobs(at(2026, 10, 16, 20, 0)), ['evening'])
+        # a daily slot within 30 minutes will run anyway
+        self.assertEqual(mi_cli.missed_jobs(at(2026, 10, 16, 16, 10)), [])
+        ran('ingest', at(2026, 10, 16, 13, 45))   # a manual run satisfies the slot
+        self.assertEqual(mi_cli.missed_jobs(at(2026, 10, 16, 14, 0)), [])
+        # Saturday has a morning slot but no evening; Sunday only the weekly one
+        self.assertEqual(mi_cli.missed_jobs(at(2026, 10, 17, 12, 0)), ['morning'])
+        ran('ingest', at(2026, 10, 17, 8, 31))
+        self.assertEqual(mi_cli.missed_jobs(at(2026, 10, 18, 12, 0)), ['weekly'])
+
+    def test_catchup_runs_composite_with_session(self):
+        seen = []
+        with patch.object(mi_cli, 'missed_jobs', return_value=['weekly', 'evening']), \
+                patch.object(mi_cli, 'run_all', side_effect=lambda names, a: seen.append((names, a.session)) or 0):
+            self.assertEqual(mi_cli.cmd_catchup(self.args()), 0)
+        self.assertEqual(seen, [(mi_cli.COMPOSITE['weekly'], None), (mi_cli.COMPOSITE['evening'], 'evening')])
+
     def test_status_failure_is_isolated_and_reported(self):
         cmds = dict(mi_cli.COMMANDS, regime=lambda a: None,
                     status=lambda a: (_ for _ in ()).throw(ValueError('status boom')))
