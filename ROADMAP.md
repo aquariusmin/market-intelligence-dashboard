@@ -60,10 +60,10 @@
 - **권고:** (b)
 - **부분 적용(2026-10-16):** 자동 실행은 이미 ECOS만 받습니다(`--providers ecos`). 손으로 `collect_macro.py`를 옵션 없이 실행할 때만 FRED 항목을 받습니다.
 
-### 7. 웹 버전 (abovemin.com/lab/markets) — 배포 대기 (2026-10-16)
-- 본인 전용 페이지(abovemin PR #57)와 `publish` 업로드를 만들었습니다. 저장 허용 출처만 올리며 FRED는 SPY/QQQ로 대체합니다.
-- **남은 일(사용자):** Supabase SQL Editor에서 버킷 마이그레이션 적용 → Vercel에 `MI_PUBLISH_TOKEN` 추가 → PR 병합(배포) → `~/.config/mi/env`의 `MI_PUBLISH_URL` 주석 해제.
-- **완료 기준:** cron 실행 뒤 사이트에서 데이터 신선도 "방금 갱신"이 보이고, 로그아웃 상태에서는 404.
+### 7. 웹 버전 (abovemin.com/lab/markets) — 배포 완료 (2026-10-16)
+- 본인 전용 페이지(abovemin PR #57)를 배포했고, 첫 업로드에 성공했습니다(1.24 MB, HTTP 200). 비로그인 시 4개 페이지 모두 404 + noindex, sitemap 미포함을 확인했습니다.
+- 이후 morning·evening·weekly 실행마다 `publish`가 자동으로 올립니다. S&P 500·NASDAQ 100은 SPY/QQQ 기준입니다.
+- **할 일:** 로그인 상태 화면 확인(사용자), 며칠간 `publish` 작업 기록 확인.
 
 ### 하지 않는 것
 - **Next.js·FastAPI·PostgreSQL 전환, 공개 배포:** 계산은 로컬에 두고, 웹은 본인 전용 표시만 합니다(7번). 데이터 약관상 공개 배포는 하지 않습니다.
