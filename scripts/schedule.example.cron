@@ -16,4 +16,4 @@ MI=/path/to/market-intelligence-dashboard
 # Sunday 10:00 weekly re-validation / retraining
 0 10 * * 0    $MI/scripts/cron_run.sh weekly
 # after boot (e.g. WSL started again): replay the latest missed slot; the delay lets the network come up
-@reboot       sleep 120 && $MI/scripts/cron_run.sh catchup
+@reboot       sleep 120 && $MI/scripts/cron_run.sh catchup --llm
