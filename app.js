@@ -415,7 +415,7 @@ function perfView() {
 function econCard(p) {
   const e = p?.economics;
   if (!isObj(e)) return '';
-  const label = {same_close: '당일 종가 진입', next_close: '하루 늦은 종가 진입 (시초가 진입의 보수적 대용)'};
+  const label = {same_close: '당일 종가 진입', next_open: '다음 거래일 시가 진입 → 시가 청산', next_close: '하루 늦은 종가 진입 (보수적)'};
   const rows = Object.entries(label).map(([k, title]) => {
     const r = e[k];
     if (!isObj(r) || r.status !== 'ok') return `<tr><td>${esc(title)}</td><td colspan="7" class="muted">${esc(r?.reason || '계산 불가')}</td></tr>`;
@@ -423,7 +423,7 @@ function econCard(p) {
     return `<tr><td class="wrap">${esc(title)}</td><td>${Number(r.periods) || 0} / ${Number(r.trades) || 0}</td><td>${pct(r.hit_rate, 0)}</td><td class="${direction(r.strategy_total)}">${pct(r.strategy_total, 1)}</td><td class="${direction(r.buy_hold_total)}">${pct(r.buy_hold_total, 1)}</td><td>${pct(r.strategy_max_drawdown, 1)} / ${pct(r.buy_hold_max_drawdown, 1)}</td><td>${sgn((r.mean_excess_vs_hold ?? NaN) * 100, 3, '%p')} [${sgn((ci[0] ?? NaN) * 100, 3)}, ${sgn((ci[1] ?? NaN) * 100, 3)}]</td><td class="wrap" style="min-width:160px">${pill(r.verdict, r.verdict === '비용 차감 후 우위' ? 'ok' : 'warn')}</td></tr>`;
   }).join('');
   const any = Object.values(e).find(r => isObj(r) && r.status === 'ok');
-  return `<div class="card" style="margin-top:18px"><div class="row sectionhead"><h2>비용 반영 성과 · 투자에 쓸 만한가</h2>${pill('HOLDOUT · 사전 고정 규칙', '')}</div><div class="tablewrap"><table><thead><tr><th>진입</th><th>기간 / 매수</th><th>적중률</th><th>전략 누적</th><th>단순 보유 누적</th><th>최대 낙폭 (전략 / 보유)</th><th>기간당 초과수익 [90% CI]</th><th>판정</th></tr></thead><tbody>${rows}</tbody></table></div><div class="note">규칙(2026-10-16 사전 고정): 주 모델이 '상승'을 가장 높게 보면 ${horizon()}거래일 보유, 아니면 현금 · 겹치지 않는 기간만 평가 · 왕복 비용 ${pct(any?.round_trip_cost, 2)} 차감 · 배당·세금·환전 미반영 · 단순 보유 대비 초과수익의 90% 하한이 0보다 클 때만 "비용 차감 후 우위"</div></div>`;
+  return `<div class="card" style="margin-top:18px"><div class="row sectionhead"><h2>비용 반영 성과 · 투자에 쓸 만한가</h2>${pill('HOLDOUT · 사전 고정 규칙', '')}</div><div class="tablewrap"><table><thead><tr><th>진입</th><th>기간 / 매수</th><th>적중률</th><th>전략 누적</th><th>단순 보유 누적</th><th>최대 낙폭 (전략 / 보유)</th><th>기간당 초과수익 [90% CI]</th><th>판정</th></tr></thead><tbody>${rows}</tbody></table></div><div class="note">규칙(2026-10-16 사전 고정): 주 모델이 '상승'을 가장 높게 보면 ${horizon()}거래일 보유, 아니면 현금 · 겹치지 않는 기간만 평가 · 왕복 비용 ${pct(any?.round_trip_cost, 2)} 차감 · 시가 진입은 다음 거래일 시가에 사고 ${horizon()}거래일 뒤 시가에 팔며(한국은 지수 시가 기준, ETF 시가와 약간 다름), 시가가 빠진 기간이 5%를 넘으면 계산하지 않음 · 배당·세금·환전 미반영 · 단순 보유 대비 초과수익의 90% 하한이 0보다 클 때만 "비용 차감 후 우위"</div></div>`;
 }
 // strongest baseline comparison (optional key; shown next to vs_class_frequency when present)
 function bestBase(b) {

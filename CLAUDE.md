@@ -58,7 +58,7 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # 가격·참고 지표 수집기 (17)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # 엔진·CLI (105)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # 엔진·CLI (108)
 node --check app.js && node scripts/test_ui.js && node --test scripts/test_intel.mjs   # 화면 로직 (UI 8그룹, 10)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \
   .venv/bin/python scripts/ui_smoke.py [--root <fixture>] [--shots <dir>] [--expect "Tab=text"]

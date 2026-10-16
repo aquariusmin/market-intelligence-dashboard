@@ -890,6 +890,37 @@ class TossTest(unittest.TestCase):
                                  'krx_openapi')
                 self.assertTrue(licenses.ml_allowed('toss_etf')[0])
 
+    def test_sync_stores_opens_history_once_then_recent_and_records_revisions(self):
+        calls = []
+        class Fake:
+            open_kospi = 5653.99
+            def daily(self, symbol, since=None, index=False):
+                calls.append((symbol, since))
+                if symbol == 'KOSPI':
+                    return [{'date': '2016-01-04', 'close': 1918.76, 'open': 1954.47},
+                            {'date': '2026-10-15', 'close': 5554.22, 'open': self.open_kospi}]
+                return [{'date': '2026-10-15', 'close': 701.0, 'open': None}]   # no open: nothing stored
+        now = datetime(2026, 10, 15, 23, 0, tzinfo=timezone.utc)
+        fake = Fake()
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertEqual(dict(calls)['KOSPI'], toss.HISTORY_START)   # first run: full open history
+                self.assertEqual(store.load_opens(conn, 'ks', 'toss_openapi'),
+                                 {'2016-01-04': 1954.47, '2026-10-15': 5653.99})
+                # index closes stay recent-only: the 2016 Toss close is not archived (KRX is the record)
+                self.assertEqual([r['date'] for r in store.load_prices(conn, 'ks', 'toss_openapi')], ['2026-10-15'])
+                self.assertEqual(store.load_opens(conn, 'sp', 'toss_etf'), {})
+                calls.clear()
+                fake.open_kospi = 5650.0
+                toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertEqual(dict(calls)['KOSPI'], date(2026, 10, 1))   # later runs: recent window only
+                rev = conn.execute("SELECT kind, old_value, new_value FROM observation_revisions WHERE kind='open'").fetchall()
+                self.assertEqual([tuple(r) for r in rev], [('open', 5653.99, 5650.0)])
+                t = prices.target_series(conn, 'ks', {'schema_version': 1, 'markets': {}}, {})
+                self.assertEqual(prices.target_opens(conn, 'ks', t)['2026-10-15'], 5650.0)
+                self.assertIsNone(prices.target_opens(conn, 'ks', {'source_id': 'licensed:ks'}))
+
 
 class JobLogTest(unittest.TestCase):
     def test_job_records_failure(self):

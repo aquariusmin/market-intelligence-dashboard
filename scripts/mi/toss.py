@@ -94,7 +94,9 @@ class Client:
         return self.get('/api/v1/market-indicators/prices', symbols=','.join(symbols))
 
     def daily(self, symbol, since=None, index=False):
-        """Daily closes, oldest first: [{'date','close'}]. index=True for KOSPI/KOSDAQ, else a stock/ETF ticker."""
+        """Daily candles, oldest first: [{'date','close','open'}] (open None when absent). index=True for
+        KOSPI/KOSDAQ, else a stock/ETF ticker. A completed US candle is the regular session: its open/close matched
+        the 09:30 / 16:00 ET minute bars, not the Toss daytime/overnight session (SPY, QQQ 2026-10-14..15)."""
         path = '/api/v1/market-indicators/%s/candles' % symbol if index else '/api/v1/candles'
         out, before = {}, None
         while True:
@@ -104,14 +106,15 @@ class Client:
             page = self.get(path, **q) or {}
             for c in page.get('candles') or []:
                 d = datetime.fromisoformat(c['timestamp']).date()
-                close = float(c['closePrice'])
+                close, open_ = float(c['closePrice']), float(c.get('openPrice') or 0)
                 if close > 0:
-                    out[d.isoformat()] = close
+                    out[d.isoformat()] = (close, open_ if open_ > 0 else None)
             before = page.get('nextBefore')
             if not before or (since and min(out, default='9999') < since.isoformat()):
                 break
             self._sleep(INTERVAL_S)
-        rows = [{'date': d, 'close': out[d]} for d in sorted(out) if not since or d >= since.isoformat()]
+        rows = [{'date': d, 'close': out[d][0], 'open': out[d][1]} for d in sorted(out)
+                if not since or d >= since.isoformat()]
         return rows
 
 
@@ -137,18 +140,25 @@ def sync(conn, client=None, now=None, log=print):
            [(m, s, False, ETF_SOURCE) for m, s in ETF_PROXY.items()]
     for market, symbol, index, source in plan:
         last = conn.execute('SELECT MAX(date) FROM prices WHERE market=? AND source_id=?', (market, source)).fetchone()[0]
-        if index:
+        last_open = conn.execute('SELECT MAX(date) FROM price_opens WHERE market=? AND source_id=?',
+                                 (market, source)).fetchone()[0]
+        if index:   # closes: recent only (KRX is the record); opens: full history once, then recent
             since = now.date() - timedelta(days=RECENT_DAYS)
         else:
             since = (date.fromisoformat(last) - timedelta(days=RECENT_DAYS)) if last else HISTORY_START
+        since_open = (date.fromisoformat(last_open) - timedelta(days=RECENT_DAYS)) if last_open else HISTORY_START
         try:
-            rows = complete(market, client.daily(symbol, since=since, index=index), now)
+            rows = complete(market, client.daily(symbol, since=min(since, since_open), index=index), now)
         except (TossError, PermissionError) as exc:
             rep['markets'][market] = {'symbol': symbol, 'status': 'failed', 'error': str(exc)}
             continue
-        ins, rev = store.upsert_prices(conn, market, [(r['date'], r['close']) for r in rows], source)
+        ins, rev = store.upsert_prices(conn, market, [(r['date'], r['close']) for r in rows
+                                                      if r['date'] >= since.isoformat()], source)
+        o_ins, o_rev = store.upsert_opens(conn, market, [(r['date'], r['open']) for r in rows if r.get('open')], source)
+        rows = [r for r in rows if r['date'] >= since.isoformat()]
         rep['markets'][market] = {'symbol': symbol, 'status': 'ok', 'source_id': source, 'inserted': ins,
-                                  'revised': rev, 'last': rows[-1]['date'] if rows else None}
+                                  'revised': rev, 'opens_inserted': o_ins, 'opens_revised': o_rev,
+                                  'last': rows[-1]['date'] if rows else None}
         if index:   # the same KRX index from two feeds: record any disagreement, never overwrite either
             krx = {r['date']: r['close'] for r in store.load_prices(conn, market, 'krx_openapi')}
             for r in rows:
@@ -158,6 +168,7 @@ def sync(conn, client=None, now=None, log=print):
                     conn.execute('INSERT INTO observation_revisions (kind, key, date, source_id, old_value, new_value, '
                                  'revised_at) VALUES (?,?,?,?,?,?,?)', ('crosscheck', market, r['date'], source, k,
                                                                          r['close'], store.now_utc()))
-        log('%s (%s): +%d rev %d · last %s' % (symbol, source, ins, rev, rep['markets'][market]['last']))
+        log('%s (%s): +%d rev %d · opens +%d rev %d · last %s' % (symbol, source, ins, rev, o_ins, o_rev,
+                                                                  rep['markets'][market]['last']))
     conn.commit()
     return rep

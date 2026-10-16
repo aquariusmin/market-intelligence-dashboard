@@ -72,7 +72,7 @@ SOURCES = {
                           redistribution='not_allowed', verified_on='2026-10-16',
                           notes='저작권보호방침: 공공데이터 목록 외 정보는 직접·딥링크로만 이용, 그 밖의 이용은 사전 승인 필요. '
                                 '보도자료 제목도 예외 없음 → 승인 전까지 미수집 (RSS 목록: /static/view/popup/rss_popup.html).'),
-    'toss_openapi': dict(provider='Toss Securities Open API', dataset='KOSPI / KOSDAQ 일봉 (당일 종가, 잠정치)',
+    'toss_openapi': dict(provider='Toss Securities Open API', dataset='KOSPI / KOSDAQ 일봉 (당일 종가 잠정치, 시가)',
                          terms_url='https://openapi.tossinvest.com/openapi-docs/faq.md', collection='allowed',
                          local_storage='conditional', ml_training='allowed', redistribution='not_allowed',
                          verified_on='2026-10-16',
@@ -81,7 +81,7 @@ SOURCES = {
                          notes='Toss FAQ 데이터 이용 정책: "투자자 본인의 매매 목적에 한하여 이용", 상업적 이용 및 제3자 배포 금지. '
                               '저장·ML 사용을 금지하는 조항 없음 → 본인 매매 판단용 개인 모델은 목적 범위 내로 판단(2026-10-16). '
                               '토큰에 권한 범위가 없어 주문도 가능 → mi/toss.py가 시세 경로만 허용.'),
-    'toss_etf': dict(provider='Toss Securities Open API', dataset='SPY / QQQ 일봉 (S&P 500 · NASDAQ 100 추종 ETF, 수정주가)',
+    'toss_etf': dict(provider='Toss Securities Open API', dataset='SPY / QQQ 일봉 (S&P 500 · NASDAQ 100 추종 ETF, 수정주가, 정규장 시가·종가)',
                      terms_url='https://openapi.tossinvest.com/openapi-docs/faq.md', collection='allowed',
                      local_storage='conditional', ml_training='allowed', redistribution='not_allowed',
                      verified_on='2026-10-16',
