@@ -123,6 +123,17 @@ INDEX_SOURCE, ETF_SOURCE = 'toss_openapi', 'toss_etf'
 SETTLE = timedelta(minutes=15)       # a session's daily candle counts only 15 minutes after its close
 HISTORY_START = date(2016, 1, 4)     # same span as the KRX archive
 RECENT_DAYS = 14                     # re-read window: late corrections and missed runs
+REBASE_MIN_ROWS = 3                  # stored rows in the window needed to recognise a rescaled history
+
+
+def rebase_factor(stored, rows):
+    """Common ratio new/stored when every overlapping close changed by the same factor (a split rescales the whole
+    adjusted history; Toss adjusted=true is split-only, dividends are not adjusted: SPY 2024-05..2026-10 equal).
+    None when nothing changed or the changes are not uniform (ordinary per-day corrections)."""
+    ratios = [r['close'] / stored[r['date']] for r in rows if stored.get(r['date'])]
+    if len(ratios) < REBASE_MIN_ROWS or abs(ratios[0] - 1) < 1e-4:
+        return None
+    return ratios[0] if all(abs(x / ratios[0] - 1) < 1e-6 for x in ratios) else None
 
 
 def complete(market, rows, now):
@@ -147,8 +158,14 @@ def sync(conn, client=None, now=None, log=print):
         else:
             since = (date.fromisoformat(last) - timedelta(days=RECENT_DAYS)) if last else HISTORY_START
         since_open = (date.fromisoformat(last_open) - timedelta(days=RECENT_DAYS)) if last_open else HISTORY_START
+        rebased = None
         try:
             rows = complete(market, client.daily(symbol, since=min(since, since_open), index=index), now)
+            if not index:   # adjusted ETF history rescaled (split): rows older than the window must follow
+                rebased = rebase_factor({r['date']: r['close'] for r in store.load_prices(conn, market, source)}, rows)
+                if rebased and since > HISTORY_START:
+                    since = since_open = HISTORY_START
+                    rows = complete(market, client.daily(symbol, since=HISTORY_START, index=index), now)
         except (TossError, PermissionError) as exc:
             rep['markets'][market] = {'symbol': symbol, 'status': 'failed', 'error': str(exc)}
             continue
@@ -158,7 +175,9 @@ def sync(conn, client=None, now=None, log=print):
         rows = [r for r in rows if r['date'] >= since.isoformat()]
         rep['markets'][market] = {'symbol': symbol, 'status': 'ok', 'source_id': source, 'inserted': ins,
                                   'revised': rev, 'opens_inserted': o_ins, 'opens_revised': o_rev,
-                                  'last': rows[-1]['date'] if rows else None}
+                                  'rebased': rebased, 'last': rows[-1]['date'] if rows else None}
+        if rebased:
+            log('%s: adjusted history rescaled ×%.6f → full history re-read (revisions logged)' % (symbol, rebased))
         if index:   # the same KRX index from two feeds: record any disagreement, never overwrite either
             krx = {r['date']: r['close'] for r in store.load_prices(conn, market, 'krx_openapi')}
             for r in rows:

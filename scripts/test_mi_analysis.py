@@ -921,6 +921,40 @@ class TossTest(unittest.TestCase):
                 self.assertEqual(prices.target_opens(conn, 'ks', t)['2026-10-15'], 5650.0)
                 self.assertIsNone(prices.target_opens(conn, 'ks', {'source_id': 'licensed:ks'}))
 
+    def test_split_rescaled_etf_history_is_reread_in_full(self):
+        days = ['2016-01-04', '2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08']
+        calls = []
+        class Fake:
+            factor, fix = 1.0, {}
+            def daily(self, symbol, since=None, index=False):
+                calls.append((symbol, since))
+                if index:
+                    return []
+                return [{'date': d, 'close': self.fix.get(d, 400.0 + i) * self.factor, 'open': 399.0 * self.factor}
+                        for i, d in enumerate(days) if d >= since.isoformat()]
+        now = datetime(2026, 10, 9, 23, 0, tzinfo=timezone.utc)
+        fake = Fake()
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                toss.sync(conn, fake, now=now, log=lambda *a: None)
+                fake.fix = {'2026-10-07': 402.5}            # one-day correction: not a rescale, window only
+                calls.clear()
+                rep = toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertIsNone(rep['markets']['sp']['rebased'])
+                self.assertNotIn(('SPY', toss.HISTORY_START), calls)
+                fake.fix, fake.factor = {'2026-10-07': 402.5}, 0.25   # 4-for-1 split rescales everything
+                calls.clear()
+                rep = toss.sync(conn, fake, now=now, log=lambda *a: None)
+                self.assertAlmostEqual(rep['markets']['sp']['rebased'], 0.25)
+                self.assertIn(('SPY', toss.HISTORY_START), calls)
+                closes = {r['date']: r['close'] for r in store.load_prices(conn, 'sp', 'toss_etf')}
+                self.assertEqual(closes['2016-01-04'], 100.0)      # the old row follows the new basis
+                self.assertEqual(store.load_opens(conn, 'sp', 'toss_etf')['2016-01-04'], 99.75)
+                n = conn.execute("SELECT COUNT(*) FROM observation_revisions WHERE key='sp' AND kind='price' "
+                                 "AND date='2016-01-04'").fetchone()[0]
+                self.assertEqual(n, 1)                                 # old value kept in the revision log
+        self.assertIsNone(toss.rebase_factor({'a': 1.0, 'b': 2.0}, [{'date': 'a', 'close': 0.5}, {'date': 'b', 'close': 1.0}]))
+
 
 class JobLogTest(unittest.TestCase):
     def test_job_records_failure(self):
