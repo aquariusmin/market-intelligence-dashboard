@@ -12,6 +12,7 @@
   backfill   KRX KOSPI/KOSDAQ history -> archive   (resumable, rate-limited; needs KRX_API_KEY)
   label-export / label-score   news headlines -> data/eval/news_labels.csv / accuracy -> nlp_eval.json
   morning | evening | weekly | all   composite jobs (see README schedule)
+  publish    owner-only web copy -> abovemin.com/lab/markets (needs MI_PUBLISH_URL/TOKEN; else checks only)
   catchup    run the latest scheduled job missed while this computer was off (cron @reboot)
 """
 import argparse
@@ -26,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer shared with the price collector)
-from mi import VERSION, backfill, briefing, daily, dart, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, backfill, briefing, daily, dart, publish, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 from mi.timing import KST  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
@@ -355,6 +356,27 @@ def reference_macro_state():
         return {'exists': True, 'error': '%s: %s' % (type(exc).__name__, exc)}
 
 
+def cmd_publish(args):
+    with store.job('publish') as res, store.connect() as conn:
+        files = publish.build(conn)
+        sizes = {k: len(json.dumps(v, ensure_ascii=False).encode()) for k, v in files.items()}
+        srcs = {k: m.get('source_id') or m.get('status') for k, m in files['core']['markets'].items()}
+        url, token = os.environ.get('MI_PUBLISH_URL', '').strip(), os.environ.get('MI_PUBLISH_TOKEN', '').strip()
+        if getattr(args, 'out', None):   # local copy for reviewing the site pages (never committed: data/ is ignored)
+            args.out.mkdir(parents=True, exist_ok=True)
+            for name, payload in files.items():
+                atomic_json(args.out / ('%s.json' % name), payload)
+            res['status'], res['message'] = 'ok', 'wrote %s · sizes %s' % (args.out, sizes)
+        elif getattr(args, 'dry_run', False) or not (url and token):
+            res['status'] = 'unavailable' if not (url and token) else 'ok'
+            res['message'] = 'not uploaded (%s) · sizes %s · sources %s' % (
+                'dry run' if url and token else 'MI_PUBLISH_URL/TOKEN 없음', sizes, srcs)
+        else:
+            rep = publish.upload(files, url, token)
+            res['message'] = 'uploaded %d bytes · HTTP %d · sources %s' % (rep['bytes'], rep['status'], srcs)
+        print(res['message'])
+
+
 def cmd_backup(args):
     with store.connect() as conn:
         dest = store.backup(conn)
@@ -389,10 +411,10 @@ def run_all(names, args):
 
 COMMANDS = {'ingest': cmd_ingest, 'regime': cmd_regime, 'train': cmd_train, 'forecast': cmd_forecast,
             'news': cmd_news, 'briefing': cmd_briefing, 'status': cmd_status, 'backup': cmd_backup,
-            'backfill': cmd_backfill, 'label-export': cmd_label_export, 'label-score': cmd_label_score}
-COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
-             'evening': ['ingest', 'regime', 'forecast', 'news', 'briefing'],
-             'weekly': ['ingest', 'regime', 'train', 'forecast'],
+            'backfill': cmd_backfill, 'publish': cmd_publish, 'label-export': cmd_label_export, 'label-score': cmd_label_score}
+COMPOSITE = {'morning': ['ingest', 'regime', 'forecast', 'news', 'briefing', 'publish'],
+             'evening': ['ingest', 'regime', 'forecast', 'news', 'briefing', 'publish'],
+             'weekly': ['ingest', 'regime', 'train', 'forecast', 'publish'],
              'all': ['ingest', 'regime', 'train', 'forecast', 'news', 'briefing']}
 
 
@@ -450,7 +472,7 @@ def cmd_catchup(args):
     return code
 
 
-SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET', 'ECOS_API_KEY', 'DART_API_KEY')
+SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET', 'ECOS_API_KEY', 'DART_API_KEY', 'MI_PUBLISH_URL', 'MI_PUBLISH_TOKEN')
 
 
 def load_env_file(path=None):
@@ -486,6 +508,8 @@ def main(argv=None):
     p.add_argument('--with-fred-risk', action='store_true',
                    help='ingest: also fetch FRED-hosted VIX / ICE spreads for display (terms restrict storage; opt-in)')
     p.add_argument('--no-gdelt', action='store_true')
+    p.add_argument('--out', type=Path, help='publish: write the bundle to this folder instead of uploading')
+    p.add_argument('--dry-run', action='store_true', help='publish: build and check the bundle without uploading')
     p.add_argument('--llm', action='store_true', help='briefing: paid Claude API rewrite of the summary (needs key)')
     p.add_argument('--session', choices=['morning', 'evening'])
     p.add_argument('--bootstrap', type=int, help='train: bootstrap replicates (default 500)')

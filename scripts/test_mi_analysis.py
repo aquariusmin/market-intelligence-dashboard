@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import backfill, briefing, daily, dart, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import backfill, briefing, daily, dart, publish, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -581,6 +581,66 @@ class DartTest(unittest.TestCase):
         many = json.dumps(dict(json.loads(self.OK), total_count=250))
         with patch.dict('os.environ', {'DART_API_KEY': 'k'}):
             self.assertEqual(dart.collect(request=lambda u: many)['truncated'], ['ks 250건 중 최신 100건', 'kq 250건 중 최신 100건'])
+
+
+class PublishTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.patches = [patch('mi.paths.DB', d / 'mi.sqlite'), patch('mi.paths.DATA', d),
+                        patch('mi.paths.DASHBOARD', d / 'dashboard'), patch('mi.paths.MARKETS_JSON', d / 'markets.json'),
+                        patch('mi.licenses.licensed_manifest', return_value={})]
+        for p_ in self.patches:
+            p_.start()
+        (d / 'dashboard').mkdir()
+        days = pd.bdate_range('2024-01-02', periods=300)
+        rows = [(x.date().isoformat(), 100 + i * 0.1) for i, x in enumerate(days)]
+        fred = [{'date': a, 'close': b * 50} for a, b in rows]
+        (d / 'markets.json').write_text(json.dumps({'schema_version': 1, 'markets': {
+            'sp': {'status': 'ok', 'history': fred}, 'nq': {'status': 'ok', 'history': fred}}}))
+        with store.connect() as conn:
+            store.upsert_prices(conn, 'sp', rows, 'toss_etf')
+            store.upsert_prices(conn, 'ks', rows, 'krx_openapi')
+
+    def tearDown(self):
+        for p_ in self.patches:
+            p_.stop()
+        self.tmp.cleanup()
+
+    def test_bundle_uses_storable_sources_only(self):
+        with store.connect() as conn:
+            files = publish.build(conn)
+        m = files['core']['markets']
+        self.assertEqual((m['sp']['source_id'], m['sp']['proxy'], m['sp']['label']), ('toss_etf', 'SPY', 'S&P 500 (SPY 기준)'))
+        self.assertEqual(m['sp']['rows'][-1][1], 129.9)          # the ETF close, never the FRED index value
+        self.assertNotIn(129.9 * 50, [r[1] for r in m['sp']['rows']])
+        self.assertEqual(m['nq']['status'], 'unavailable')       # FRED only, no ETF archived
+        self.assertEqual(m['ks']['source_id'], 'krx_openapi')
+        self.assertEqual(m['ks']['regime']['status'], 'ok')
+        bad = {'core': {'markets': {'sp': {'status': 'ok', 'source_id': 'fred_sp500'}}}}
+        with self.assertRaises(publish.PublishError):
+            publish.check(bad)
+
+    def test_upload_keeps_token_out_of_argv_and_cleans_up(self):
+        seen = {}
+        def run(args, input, **kw):
+            seen.update(args=args, config=input)
+            body = Path(input.split('data-binary = "@')[1].split('"')[0])
+            seen['body_mode'] = body.stat().st_mode & 0o777
+            seen['body'] = body
+            return type('R', (), {'returncode': 0, 'stdout': '{"ok":true}\n__MI_HTTP_STATUS__:200', 'stderr': ''})
+        rep = publish.upload({'core': {}}, 'https://example.org/api/x', 'TOKEN123', run=run)
+        self.assertEqual(rep['status'], 200)
+        self.assertNotIn('TOKEN123', ' '.join(seen['args']))
+        self.assertIn('Authorization: Bearer TOKEN123', seen['config'])
+        self.assertEqual(seen['body_mode'], 0o600)
+        self.assertFalse(seen['body'].exists())
+        fail = lambda args, input, **kw: type('R', (), {'returncode': 0, 'stdout': 'bad TOKEN123\n__MI_HTTP_STATUS__:401', 'stderr': ''})
+        with self.assertRaises(publish.PublishError) as cm:
+            publish.upload({'core': {}}, 'https://example.org/api/x', 'TOKEN123', run=fail)
+        self.assertNotIn('TOKEN123', str(cm.exception))
+        with self.assertRaises(publish.PublishError):
+            publish.upload({}, 'http://example.org', 'T', run=fail)
 
 
 class DailyTest(unittest.TestCase):

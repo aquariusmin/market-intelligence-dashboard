@@ -25,6 +25,7 @@
   - `explain.py`: 전망 변화 설명
   - `news.py`, `sentiment.py`, `events.py`, `briefing.py`, `nlp_eval.py`: 뉴스와 브리핑 (`briefing`은 LLM 월 예산 검사)
   - `dart.py`: OpenDART 주요사항보고서 목록(보관 안 함, 표시 전용)
+  - `publish.py`: 본인 전용 웹 버전(abovemin.com/lab/markets) 묶음. 저장 허용 출처만, FRED는 SPY/QQQ로 대체
   - `store.py`: SQLite `data/mi.sqlite`
 - **파이프라인** `scripts/mi_cli.py`: 진입점. `data/dashboard/*.json`에 쓴다.
 - **화면** `index.html`(레이아웃, CSS, DEMO 샘플 화면) + `app.js`(REAL DATA 화면 전체). 빌드 단계가 없다. `scripts/serve.py`로 띄운다.
@@ -38,7 +39,7 @@
 4. **검증 우선**: 무작위 분할을 쓰지 않는다. 검증 기준, 임계값, 비용 규칙은 사전에 고정하고 holdout 결과를 보고 바꾸지 않는다. 이미 holdout을 본 모델의 입력을 바꾸지 않는다. 성능이 나빠도 숨기지 않는다. 검증을 통과하지 못한 확률은 "신뢰할 수 없음"으로 표시한다.
 5. **이력 보존**: 기존 관측값, 예측 이력, 사용자 데이터를 삭제하거나 덮어쓰지 않는다. 예측은 추가만 하고, 백테스트와 실시간 예측을 분리한다. 값이 바뀌면 `observation_revisions`에 기록한다.
 6. **동작 보존**: DEMO 모드와 가격 수집기의 CLI·출력 형식을 유지한다. 리팩터링할 때는 테스트와 브라우저 스모크로 기존 동작을 확인한다.
-7. **비밀정보**: API 키는 환경변수로만 다룬다(`KRX_API_KEY`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `ANTHROPIC_API_KEY`, `ECOS_API_KEY`, `DART_API_KEY`). 토스 토큰은 주문 권한까지 있으므로 `mi/toss.py`의 시세 경로 허용 목록을 넓히지 않는다. 키를 코드, JSON, 로그, 커밋 메시지에 남기지 않는다.
+7. **비밀정보**: API 키는 환경변수로만 다룬다(`KRX_API_KEY`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `ANTHROPIC_API_KEY`, `ECOS_API_KEY`, `DART_API_KEY`, `MI_PUBLISH_TOKEN`). 토스 토큰은 주문 권한까지 있으므로 `mi/toss.py`의 시세 경로 허용 목록을 넓히지 않는다. 키를 코드, JSON, 로그, 커밋 메시지에 남기지 않는다.
 8. **승인 필요**: 유료 API나 데이터 계약, 유료 LLM 호출(`briefing --llm`), GitHub push, 외부 배포, abovemin.com 변경, 사용자 데이터 삭제.
 9. **보고**: 실행하지 않은 테스트를 통과했다고 보고하지 않는다. 미완료 항목은 사유와 함께 밝힌다.
 
@@ -51,6 +52,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   
 .venv/bin/python scripts/mi_cli.py ingest|regime|train|forecast|news|briefing|status
 .venv/bin/python scripts/mi_cli.py morning|evening|weekly|all|catchup            # 단계 실패 격리 · catchup = 놓친 작업 재실행
 .venv/bin/python scripts/mi_cli.py backup | backfill [--since YYYY-MM-DD] | label-export | label-score
+.venv/bin/python scripts/mi_cli.py publish [--dry-run | --out DIR]                 # 웹 버전 업로드 (abovemin 저장소가 화면)
 python3 scripts/serve.py --port 3000                                              # make dev → localhost:3000 (허용 파일만·Host 검사·CSP)
 MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                  # 실데이터와 격리된 실험
 ```
@@ -59,7 +61,7 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # 가격·참고 지표 수집기 (18)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # 엔진·CLI (114)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # 엔진·CLI (116)
 node --check app.js && node scripts/test_ui.js && node --test scripts/test_intel.mjs   # 화면 로직 (UI 8그룹, 10)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \
   .venv/bin/python scripts/ui_smoke.py [--root <fixture>] [--shots <dir>] [--expect "Tab=text"]
