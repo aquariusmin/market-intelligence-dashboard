@@ -1,4 +1,5 @@
-# Optional local schedule (crontab -e). Runs only while this computer is on; missed runs are NOT replayed.
+# Optional local schedule (crontab -e). Runs only while this computer is on; the @reboot line replays the latest
+# missed job once after boot (`mi_cli.py catchup`, reads job_runs).
 # Times below are KST. Debian/Ubuntu cron (incl. WSL) ignores CRON_TZ, so either set the system timezone
 # to Asia/Seoul (sudo timedatectl set-timezone Asia/Seoul, or TZ in /etc/default/cron) or shift the hours.
 # CRON_TZ is kept for cronie-based systems (Fedora/RHEL/Arch), where it is honoured.
@@ -13,3 +14,5 @@ MI=/path/to/market-intelligence-dashboard
 30 16 * * 1-5 $MI/scripts/cron_run.sh evening
 # Sunday 10:00 weekly re-validation / retraining
 0 10 * * 0    $MI/scripts/cron_run.sh weekly
+# after boot (e.g. WSL started again): replay the latest missed slot; the delay lets the network come up
+@reboot       sleep 120 && $MI/scripts/cron_run.sh catchup

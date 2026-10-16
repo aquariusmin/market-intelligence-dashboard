@@ -48,7 +48,7 @@
 ```sh
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # make setup
 .venv/bin/python scripts/mi_cli.py ingest|regime|train|forecast|news|briefing|status
-.venv/bin/python scripts/mi_cli.py morning|evening|weekly|all                    # 단계 실패 격리
+.venv/bin/python scripts/mi_cli.py morning|evening|weekly|all|catchup            # 단계 실패 격리 · catchup = 놓친 작업 재실행
 .venv/bin/python scripts/mi_cli.py backup | backfill [--since YYYY-MM-DD] | label-export | label-score
 python3 scripts/serve.py --port 3000                                              # make dev → localhost:3000 (허용 파일만·Host 검사·CSP)
 MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                  # 실데이터와 격리된 실험
@@ -58,7 +58,7 @@ MI_DATA_DIR=<scratch dir> .venv/bin/python scripts/mi_cli.py ...                
 
 ```sh
 cd scripts && python3 test_data.py                                                # 가격·참고 지표 수집기 (17)
-cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # 엔진·CLI (103)
+cd scripts && ../.venv/bin/python -m unittest test_mi_forecasting test_mi_analysis test_mi_cli # 엔진·CLI (105)
 node --check app.js && node scripts/test_ui.js && node --test scripts/test_intel.mjs   # 화면 로직 (UI 8그룹, 10)
 MI_CHROMIUM=~/.cache/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell \
   .venv/bin/python scripts/ui_smoke.py [--root <fixture>] [--shots <dir>] [--expect "Tab=text"]
