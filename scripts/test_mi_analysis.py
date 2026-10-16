@@ -492,6 +492,11 @@ class EventsBriefingTest(unittest.TestCase):
         self.assertNotIn(b['sections']['us_overview'][0], spy.seen)
 
 
+    def test_rsi_oversold_term_is_not_advice(self):
+        self.assertIsNone(briefing.FORBIDDEN.search('KOSPI는 RSI 23.2로 단기 과매도 구간, 과매수 해소'))
+        self.assertTrue(briefing.FORBIDDEN.search('지금 매도하세요'))
+        self.assertTrue(briefing.FORBIDDEN.search('매수 추천'))
+
     def test_llm_monthly_budget_blocks_and_records_usage(self):
         b = self.brief()
         good_text = '분석 가능한 시장의 국면과 위험 수준을 요약했습니다. 방향 확률은 검증된 정량 모델에서만 제공됩니다.'

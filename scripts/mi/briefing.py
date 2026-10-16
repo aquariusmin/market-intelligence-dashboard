@@ -9,6 +9,7 @@ number to a different market, or uses forecast/advice vocabulary (validate_llm).
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 
 from . import news, timing
@@ -215,7 +216,7 @@ _TOKEN = re.compile('|'.join('(?P<%s>%s)' % (k, v) for k, v in MARKET_ALIASES.it
 _SENTENCE = re.compile(r'(?<!\d)[.!?](?!\d)|\n')
 # Predictive / advisory vocabulary is never allowed in the rewrite (the rule-based facts contain none).
 FORBIDDEN = re.compile(r'할 것|될 것|일 것|갈 것|것으로 (보|예상|예측|전망)|보일 것|전망|예상|상승할|하락할|오를|떨어질|'
-                       r'반등할|급등할|급락할|매수|매도|추천|유망|\bwill\b|\bexpect|\bbuy\b|\bsell\b', re.I)
+                       r'반등할|급등할|급락할|(?<!과)매수|(?<!과)매도|추천|유망|\bwill\b|\bexpect|\bbuy\b|\bsell\b', re.I)
 MULTIPLIERS = re.compile(r'두 ?배|세 ?배|네 ?배|몇 ?배|절반|반토막|배로|배 (증가|확대|감소)')
 
 
@@ -300,6 +301,8 @@ def llm_rewrite(brief, client=None, facts_brief=None, ledger=None):
                        ensure_ascii=False)
     system = ('당신은 금융시장 브리핑 편집자입니다. 주어진 FACTS JSON의 내용만 사용해 한국어 요약 3~5문장을 작성하세요. '
               '새로운 수치·확률·전망·사실을 추가하지 말고, 투자 권유를 하지 마세요. '
+              '수치는 FACTS에 쓰인 표기 그대로 옮기세요: 부호와 단위를 바꾸지 말고(예: "-13.3%"는 "-13.3%"), '
+              '"13.3% 아래"처럼 부호를 말로 바꿔 쓰지 마세요. 계산하거나 반올림하지 마세요. '
               '출력은 {"executive_summary": "..."} 형태의 JSON 하나만 작성하세요.')
     budget, spent = llm_budget(), (ledger.spent() if ledger else 0.0)
     # worst case: one token per character of input (Korean is denser than that) and the full output allowance
@@ -319,7 +322,11 @@ def llm_rewrite(brief, client=None, facts_brief=None, ledger=None):
             status = 'fallback: 모델 거절'
         else:
             text = next((b.text for b in resp.content if b.type == 'text'), '')
-            obj = validate_llm(json.loads(text[text.find('{'): text.rfind('}') + 1]), facts)
+            try:
+                obj = validate_llm(json.loads(text[text.find('{'): text.rfind('}') + 1]), facts)
+            except ValueError:
+                print('llm output rejected: %s' % text[:1500], file=sys.stderr)   # cron.log, for the rejection review
+                raise
             status = 'ok'
     except Exception as exc:  # any failure -> keep the rule-based text
         status = 'fallback: %s' % _short_error(exc)
