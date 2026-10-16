@@ -1,4 +1,5 @@
-"""Events to watch: FOMC meetings parsed from the Federal Reserve Board calendar page, plus an optional
+"""Events to watch: FOMC meetings parsed from the Federal Reserve Board calendar page, Bank of Korea monetary
+policy meetings (dates registered by hand from the official schedule), plus an optional
 user-maintained data/events.local.json ([{"date": "YYYY-MM-DD", "title": "...", "market": "ks", "url": "..."}]).
 Nothing is invented: if the calendar cannot be fetched, the section says so.
 """
@@ -11,6 +12,11 @@ import providers
 from . import paths
 
 FOMC_URL = 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm'
+BOK_MPC_URL = 'https://www.bok.or.kr/portal/singl/crncyPolicyDrcMtg/listYear.do?mtgSe=A&menuNo=200755'
+# 통화정책방향 결정회의, copied by hand from the official page (read 2026-10-16). Dates only; add next year's list
+# when the Bank of Korea publishes it (usually in December). Until then the status says it is not registered.
+BOK_MPC = {2026: ['2026-01-15', '2026-02-26', '2026-04-10', '2026-05-28', '2026-07-16', '2026-08-27', '2026-10-22',
+                  '2026-11-26']}
 MONTHS = {m: i for i, m in enumerate(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
                                       'september', 'october', 'november', 'december'], 1)}
 
@@ -50,6 +56,12 @@ def _month(token):
     return None
 
 
+def bok_mpc():
+    return [{'date': d, 'title': '한국은행 통화정책방향 결정회의 (기준금리 발표)', 'detail': '', 'market': 'kr',
+             'source': 'Bank of Korea (공식 일정, 수동 등록)', 'url': BOK_MPC_URL, 'kind': 'monetary_policy'}
+            for year in sorted(BOK_MPC) for d in BOK_MPC[year]]
+
+
 def local_events():
     if not paths.EVENTS_LOCAL.exists():
         return []
@@ -72,6 +84,11 @@ def upcoming(today=None, request=None, horizon_days=45):
         user = local_events()
     except (OSError, ValueError) as exc:
         user, status['local_error'] = [], str(exc)
-    items = [e for e in fomc + user if 0 <= (date.fromisoformat(e['date']) - today).days <= horizon_days]
+    bok = bok_mpc()
+    next_bok = next((e for e in bok if e['date'] >= today.isoformat()), None)
+    status['bok_mpc'] = 'ok' if next_bok else 'not_registered'
+    if not next_bok:
+        status['bok_error'] = '%d년 금통위 일정 미등록 · events.BOK_MPC에 공식 일정 추가 필요' % (max(BOK_MPC) + 1)
+    items = [e for e in fomc + bok + user if 0 <= (date.fromisoformat(e['date']) - today).days <= horizon_days]
     return {'items': sorted(items, key=lambda e: e['date']), 'status': status,
-            'next_fomc': next((e for e in fomc if e['date'] >= today.isoformat()), None)}
+            'next_fomc': next((e for e in fomc if e['date'] >= today.isoformat()), None), 'next_bok': next_bok}

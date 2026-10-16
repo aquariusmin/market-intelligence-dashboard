@@ -88,7 +88,7 @@ def validate_macro_rows(rows, config, today):
     return rows
 
 
-def collect_macro(output, adapters=None, today=None):
+def collect_macro(output, adapters=None, today=None, providers=None):
     adapters=adapters if adapters is not None else {'fred':fred,'ecos':ecos}
     today=today or date.today()
     now=datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -103,6 +103,13 @@ def collect_macro(output, adapters=None, today=None):
     failures=successes=0
     for key,config in MACRO.items():
         prev=old['indicators'].get(key,{})
+        if providers and config['provider'] not in providers:
+            # not requested in this run: keep whatever the file already had (never fetched, never stored anew)
+            result['indicators'][key]=dict(prev) if prev else dict(config,value=None,observation_date=None,
+                publication_date=None,source_updated_at=None,updated_at=None,history=[],change=None,
+                previous_observation_date=None,status='unavailable',last_attempt_at=None,
+                error='이 실행에서 수집하지 않음 (--providers %s)'%','.join(providers))
+            continue
         try:
             if config['provider']=='unavailable':
                 raise RuntimeError('무료 수집원/이용 권한 미확보 · 광의 달러 지수를 DXY로 대체하지 않음')
@@ -138,8 +145,10 @@ def collect_macro(output, adapters=None, today=None):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,default=Path(__file__).resolve().parents[1]/'data/reference_only/macro.json')
+    parser.add_argument('--providers',nargs='+',choices=['fred','ecos'],
+                        help='collect only these providers; other entries keep their previous values (default: all)')
     args=parser.parse_args()
-    try: sys.exit(1 if collect_macro(args.output) else 0)
+    try: sys.exit(1 if collect_macro(args.output,providers=args.providers) else 0)
     except Exception as exc:
         print('Macro collection aborted; snapshot unchanged: %s'%exc,file=sys.stderr)
         sys.exit(2)

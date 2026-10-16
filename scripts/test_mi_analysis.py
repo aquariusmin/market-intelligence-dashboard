@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import collect_data
-from mi import backfill, briefing, daily, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
+from mi import backfill, briefing, daily, dart, events, explain, nlp_eval, toss, forecasting, indicators, licenses, macro, news, prices, regime, store, validation
 from test_mi_forecasting import bdays, rows, walk
 
 
@@ -352,7 +352,18 @@ class EventsBriefingTest(unittest.TestCase):
         def boom(u): raise RuntimeError('offline')
         down = events.upcoming(date(2026, 10, 15), request=boom)
         self.assertEqual(down['status']['fomc'], 'failed')
-        self.assertEqual(down['items'], [])
+        self.assertEqual([e['source'] for e in down['items'] if 'Federal Reserve' in e['source']], [])   # no FOMC invented
+
+    def test_bok_meetings_are_listed_and_missing_year_is_flagged(self):
+        up = events.upcoming(date(2026, 10, 15), request=lambda u: self.HTML)
+        self.assertEqual(up['next_bok']['date'], '2026-10-22')
+        self.assertEqual([e['date'] for e in up['items']], ['2026-10-22', '2026-10-28', '2026-11-26'])
+        self.assertEqual(up['status']['bok_mpc'], 'ok')
+        late = events.upcoming(date(2026, 12, 1), request=lambda u: self.HTML)
+        self.assertIsNone(late['next_bok'])
+        self.assertEqual(late['status']['bok_mpc'], 'not_registered')
+        self.assertIn('2027년', late['status']['bok_error'])
+        self.assertTrue(all(d.startswith('%d-' % y) for y, ds in events.BOK_MPC.items() for d in ds))
 
     def test_fomc_meeting_spanning_year_end(self):
         html = ('<h4>2026 FOMC Meetings</h4><div class="fomc-meeting__month"><strong>December</strong></div>'
@@ -479,6 +490,80 @@ class EventsBriefingTest(unittest.TestCase):
         briefing.llm_rewrite(b, spy, facts_brief=facts)
         self.assertIn('REDACTED VIEW', spy.seen)   # the model sees the restricted copy, not the display copy
         self.assertNotIn(b['sections']['us_overview'][0], spy.seen)
+
+
+    def test_llm_monthly_budget_blocks_and_records_usage(self):
+        b = self.brief()
+        good_text = '분석 가능한 시장의 국면과 위험 수준을 요약했습니다. 방향 확률은 검증된 정량 모델에서만 제공됩니다.'
+
+        class Fake:
+            calls = 0
+            beta = messages = None
+            def __init__(self):
+                self.beta = self.messages = self
+            def create(self, **kw):
+                Fake.calls += 1
+                block = type('B', (), {'type': 'text', 'text': json.dumps({'executive_summary': good_text}, ensure_ascii=False)})
+                usage = type('U', (), {'input_tokens': 2000, 'output_tokens': 1000})
+                return type('R', (), {'stop_reason': 'end_turn', 'content': [block], 'usage': usage,
+                                      'model': 'claude-opus-5-5'})
+        with tempfile.TemporaryDirectory() as tmp, patch('mi.paths.DB', Path(tmp) / 'mi.sqlite'):
+            with store.connect() as conn:
+                now = datetime(2026, 10, 16, 0, 0, tzinfo=timezone.utc)
+                ledger = store.LlmLedger(conn, now)
+                out, status = briefing.llm_rewrite(b, Fake(), ledger=ledger)
+                self.assertTrue(status.startswith('ok · $0.0280'), status)   # 2000×$4/M + 1000×$20/M
+                self.assertAlmostEqual(ledger.spent(), 0.028)
+                self.assertEqual(out['sections']['executive_summary'], good_text)
+                with patch.dict('os.environ', {'MI_LLM_BUDGET_USD': '0.05'}):
+                    _, status = briefing.llm_rewrite(b, Fake(), ledger=ledger)   # 0.028 + worst case > 0.05
+                self.assertTrue(status.startswith('skipped: 월 예산'), status)
+                self.assertEqual(Fake.calls, 1)
+                self.assertEqual(store.LlmLedger(conn, datetime(2026, 11, 1, tzinfo=timezone.utc)).spent(), 0)
+                # a rejected output was still billed: it is booked too
+                class Bad(Fake):
+                    def create(self, **kw):
+                        r = super().create(**kw)
+                        r.content[0].text = '{"executive_summary": "S&P 500 상승 확률 87%. 강력 매수."}'
+                        return r
+                _, status = briefing.llm_rewrite(b, Bad(), ledger=ledger)
+                self.assertTrue(status.startswith('fallback'), status)
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM llm_usage').fetchone()[0], 2)
+        self.assertEqual(briefing.llm_cost('unknown-model', 1e6, 0), max(p[0] for p in briefing.LLM_PRICES.values()))
+
+
+class DartTest(unittest.TestCase):
+    OK = json.dumps({'status': '000', 'list': [
+        {'corp_cls': 'Y', 'corp_name': '삼성전자', 'stock_code': '005930', 'report_nm': '주요사항보고서(자기주식취득결정)',
+         'rcept_no': '20261015000123', 'rcept_dt': '20261015'},
+        {'corp_cls': 'Y', 'corp_name': '', 'report_nm': 'x', 'rcept_no': 'bad', 'rcept_dt': '2026'}]}, ensure_ascii=False)
+
+    def test_parse_statuses(self):
+        rows = dart.parse(self.OK, 'ks')
+        self.assertEqual(len(rows), 1)                      # malformed row dropped
+        self.assertEqual(rows[0]['url'], dart.VIEWER + '20261015000123')
+        self.assertEqual((rows[0]['date'], rows[0]['market']), ('2026-10-15', 'ks'))
+        self.assertEqual(dart.parse('{"status": "013", "message": "no data"}', 'kq'), [])
+        with self.assertRaises(ValueError):
+            dart.parse('{"status": "020", "message": "limit"}', 'ks')
+        with self.assertRaises(ValueError):
+            dart.parse('<html>error</html>', 'ks')
+
+    def test_collect_isolates_markets_and_hides_key(self):
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(dart.collect(request=lambda u: self.OK)['status'], 'unavailable')
+        seen = []
+        def req(url):
+            seen.append(url)
+            if 'corp_cls=K' in url:
+                raise RuntimeError('timeout for ' + url)
+            return self.OK
+        with patch.dict('os.environ', {'DART_API_KEY': 'SECRETKEY123'}):
+            rep = dart.collect(request=req, now=datetime(2026, 10, 16, 1, 0, tzinfo=timezone.utc))
+        self.assertEqual((rep['status'], len(rep['items'])), ('partial', 1))
+        self.assertNotIn('SECRETKEY123', rep['error'])
+        self.assertIn('bgn_de=20261013', seen[0])
+        self.assertIn('pblntf_ty=B', seen[0])
 
 
 class DailyTest(unittest.TestCase):

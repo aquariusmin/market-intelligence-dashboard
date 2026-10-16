@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_data import atomic_json  # noqa: E402  (stdlib atomic writer shared with the price collector)
-from mi import VERSION, backfill, briefing, daily, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
+from mi import VERSION, backfill, briefing, daily, dart, events, forecasting, nlp_eval, toss, licenses, macro, news, paths, prices, regime, store  # noqa: E402
 from mi.timing import KST  # noqa: E402
 
 OUT = lambda name: paths.DASHBOARD / name
@@ -88,14 +88,24 @@ def cmd_ingest(args):
                 except Exception as exc:
                     toss_rep = {'error': '%s: %s' % (type(exc).__name__, exc)}
                     traceback.print_exc()
+        ref_macro = None
+        if os.environ.get('ECOS_API_KEY', '').strip():
+            # display-only Korea rates (ECOS). FRED entries of that file are not fetched from cron: the engine keeps
+            # FRED out of storage, and FRED risk series are shown via the opt-in --with-fred-risk snapshot instead.
+            ref = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'collect_macro.py'), '--output',
+                                  str(paths.DATA / 'reference_only' / 'macro.json'), '--providers', 'ecos'])
+            ref_macro = {'exit': ref.returncode, 'providers': ['ecos']}
         if transient:
             write('fred_risk.json', {'note': '표시 전용 스냅샷 (보관 아님) · 사용자 옵트인 --with-fred-risk',
                                      'fetched_at': store.now_utc(), 'series': transient})
         elif OUT('fred_risk.json').exists() and not args.with_fred_risk:
             OUT('fred_risk.json').unlink()  # opt-in withdrawn: drop the display snapshot
         write('ingest.json', {'ran_at': store.now_utc(), 'price_collector_exit': code, 'archive': archived,
-                              'archive_error': archive_error, 'macro': results, 'toss': toss_rep})
+                              'archive_error': archive_error, 'macro': results, 'toss': toss_rep,
+                              'reference_macro': ref_macro})
         failed = [k for k, v in results.items() if v['status'] in ('stale', 'unavailable')]
+        if ref_macro and ref_macro['exit']:
+            failed.append('ecos')
         failed += ['toss:' + m for m, v in ((toss_rep or {}).get('markets') or {}).items() if v.get('status') != 'ok']
         if toss_rep and toss_rep.get('error'):
             failed.append('toss')
@@ -171,11 +181,14 @@ def cmd_news(args):
     with store.job('news') as res, store.connect() as conn:
         report = news.collect(conn, use_gdelt=not args.no_gdelt)
         items = news.recent(conn)
+        disclosures = dart.collect()
+        report['dart_openapi'] = {'status': disclosures['status'], 'items': len(disclosures['items']),
+                                  'error': disclosures['error'], 'storage': 'not_stored'}
         write('news.json', {'generated_at': store.now_utc(), 'report': report, 'items': items,
                             'sentiment_note': '영문 제목 키워드 휴리스틱(lexicon-en-v2) · 한국어 감성 미산출 · 참고용',
                             'model_licenses': licenses.MODELS,
                             'separation_note': '뉴스 분석은 예측 모델 입력으로 사용하지 않습니다.',
-                            'evaluation': nlp_eval.load_report()})
+                            'evaluation': nlp_eval.load_report(), 'disclosures': disclosures})
         failed = [k for k, v in report.items() if isinstance(v, dict) and v.get('status') == 'failed']
         res['status'] = 'ok' if not failed else 'partial'
         res['message'] = 'added %d; failed: %s' % (report['added'], ','.join(failed) or 'none')
@@ -240,12 +253,12 @@ def cmd_briefing(args):
                               restricted=restricted_markets(reg), macro_changes=macro_changes)
         llm_status = 'not requested'
         if args.llm:
-            brief, llm_status = briefing.llm_rewrite(brief, facts_brief=kept)
-            if llm_status == 'ok':
+            brief, llm_status = briefing.llm_rewrite(brief, facts_brief=kept, ledger=store.LlmLedger(conn, now))
+            if llm_status.startswith('ok'):
                 kept['sections']['executive_summary'] = brief['sections']['executive_summary']
                 kept['method'] = brief['method']
         for b in (brief, kept):
-            b.update(events_status=ev['status'], next_fomc=ev['next_fomc'], llm_status=llm_status,
+            b.update(events_status=ev['status'], next_fomc=ev['next_fomc'], next_bok=ev.get('next_bok'), llm_status=llm_status,
                      input_warnings=input_warnings(getattr(args, 'failed_stages', ())))
         conn.execute('INSERT INTO briefings (created_at, session, method, content) VALUES (?,?,?,?)',
                      (kept['generated_at'], kept['session'], kept['method'], store.dumps(kept)))
@@ -437,7 +450,7 @@ def cmd_catchup(args):
     return code
 
 
-SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET')
+SECRET_VARS = ('KRX_API_KEY', 'ANTHROPIC_API_KEY', 'TOSS_CLIENT_ID', 'TOSS_CLIENT_SECRET', 'ECOS_API_KEY', 'DART_API_KEY')
 
 
 def load_env_file(path=None):

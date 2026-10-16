@@ -51,12 +51,16 @@ cat >> ~/.config/mi/env <<'EOF'   # 본인 터미널에서 직접 입력
 export KRX_API_KEY=...            # KRX OPEN API (KOSPI/KOSDAQ 공식 종가)
 export TOSS_CLIENT_ID=...         # 토스증권 Open API (당일 종가, SPY/QQQ) · WTS에서 발급 + 허용 IP 등록
 export TOSS_CLIENT_SECRET=...
-export ANTHROPIC_API_KEY=...      # 선택: AI 요약 (briefing --llm, 유료)
+export ECOS_API_KEY=...           # 선택: 한국은행 ECOS (기준금리·국고채 3년 참고 지표, 무료)
+export DART_API_KEY=...           # 선택: OpenDART (주요사항보고서 목록, 무료)
+export ANTHROPIC_API_KEY=...      # 선택: AI 요약 (briefing --llm, 유료 · 월 예산 상한 있음)
 EOF
 chmod 600 ~/.config/mi/env
 ```
 
-- 표시 전용 참고 지표(`scripts/collect_macro.py`)는 `ECOS_API_KEY`(한국은행 ECOS)를 같은 터미널 환경변수로 받습니다.
+- `ECOS_API_KEY`가 있으면 `ingest`가 참고 지표 중 ECOS 항목만 갱신합니다(`collect_macro.py --providers ecos`). FRED 항목은 자동 실행에서 받지 않습니다.
+- `DART_API_KEY`가 있으면 `news`가 최근 3일 KOSPI·KOSDAQ 주요사항보고서 목록을 함께 받습니다. 저장하지 않고 매번 교체합니다.
+- **AI 요약 비용:** `briefing --llm`은 실제 사용 토큰을 `llm_usage` 테이블에 기록하고, 이번 달 사용액과 이번 호출의 최대 예상액의 합이 월 예산(기본 $3.5 ≈ 5,000원, `MI_LLM_BUDGET_USD`로 변경)을 넘으면 호출하지 않습니다. 1회 약 $0.03입니다.
 - 확인: `python3 scripts/collect_data.py --check-krx 2026-10-14`
 
 ### 자동 실행
@@ -185,7 +189,9 @@ chmod 600 ~/.config/mi/env
 | GDELT DOC | 허용(5초당 1회) | 메타데이터만 | 불허 | 조건부 | 제목·URL 권리는 언론사 |
 | Cboe VIX · ICE OAS (FRED) | 옵트인 | 불가(엔진) | 불가 | 불가 | 엔진은 3일 TTL 표시만. 참고 지표 파일은 아래 참고 |
 | 한국은행 RSS | 불허 | 불허 | 불허 | 불허 | 링크 외 이용은 사전 승인 필요 → 미수집 |
-| ECOS (참고 지표) | 키 | 표시 전용 | 불허 | — | 학습 권한 미검토 → 참고 전용 |
+| 한국은행 금통위 일정 | 수동 등록 | 허용 | 불허 | 허용 | 공식 일정 페이지의 날짜만 옮겨 적음, 링크로 출처 표시 |
+| ECOS (참고 지표) | 허용(키) | 허용 | 조건부 | 조건부 | 이용약관 제5조: 상업적 이용 가능, 단 통계작성기관이 제한한 통계는 승인 필요 → 표시 전용 유지 |
+| OpenDART 공시 목록 | 허용(키, 일 약 2만 건) | 불명확 → 보관 안 함 | 불명확 | 불명확 | 약관에 저장·재배포 조항 없음 → 최신 목록만 표시 |
 
 **알려진 위험 (수용):** 가격 스냅샷 `data/markets.json`은 FRED 종가(약 2년)를 디스크에 둡니다. 참고 지표 `data/reference_only/macro.json`(`collect_macro.py`, 선택)도 FRED 시리즈를 보관합니다. 둘 다 FRED의 저장 금지 조항과 충돌할 소지가 있어 `CODE_REVIEW.md`(C1)에 기록했습니다. 둘 다 공개 저장소에 올라가지 않으며 학습에 쓰지 않습니다.
 

@@ -70,12 +70,15 @@ CREATE TABLE IF NOT EXISTS krx_calendar (
   checked_at TEXT NOT NULL, PRIMARY KEY (market, date));
 CREATE TABLE IF NOT EXISTS provider_calls (
   provider TEXT NOT NULL, day_kst TEXT NOT NULL, calls INTEGER NOT NULL, PRIMARY KEY (provider, day_kst));
+CREATE TABLE IF NOT EXISTS llm_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, month_kst TEXT NOT NULL, model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, status TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS job_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, started_at TEXT NOT NULL,
   finished_at TEXT, status TEXT NOT NULL, message TEXT);
 """
 ARCHIVE_TABLES = ('prices', 'price_opens', 'macro', 'forecasts', 'backtest_runs', 'news', 'briefings', 'job_runs')
-SCHEMA_VERSION = 5  # PRAGMA user_version; bump with an explicit migration step in _migrate()
+SCHEMA_VERSION = 6  # PRAGMA user_version; bump with an explicit migration step in _migrate()
 BUSY_TIMEOUT_S = 60
 STALE_JOB_HOURS = 6
 
@@ -124,7 +127,7 @@ def _migrate(conn):
         if any(conn.execute('SELECT 1 FROM %s LIMIT 1' % t).fetchone() for t in ARCHIVE_TABLES):
             backup(conn, suffix='pre-v%d' % SCHEMA_VERSION)
         # v2: holdout_registry; v3: daily_snapshots; v4: krx_calendar, provider_calls;
-        # v5: price_opens (all created by SCHEMA above).
+        # v5: price_opens; v6: llm_usage (all created by SCHEMA above).
         conn.execute('PRAGMA user_version = %d' % SCHEMA_VERSION)
         conn.commit()
 
@@ -211,6 +214,23 @@ def upsert_opens(conn, market, rows, source_id):
 def load_opens(conn, market, source_id):
     return {r['date']: r['open'] for r in conn.execute(
         'SELECT date, open FROM price_opens WHERE market = ? AND source_id = ? ORDER BY date', (market, source_id))}
+
+
+class LlmLedger:
+    """Paid LLM spend per KST calendar month (append-only), used by briefing.llm_rewrite's budget check."""
+    def __init__(self, conn, now=None):
+        from .timing import KST
+        self.conn, self.month = conn, (now or datetime.now(timezone.utc)).astimezone(KST).strftime('%Y-%m')
+
+    def spent(self):
+        return self.conn.execute('SELECT COALESCE(SUM(cost_usd), 0) FROM llm_usage WHERE month_kst=?',
+                                 (self.month,)).fetchone()[0]
+
+    def record(self, model, input_tokens, output_tokens, cost_usd, status):
+        self.conn.execute('INSERT INTO llm_usage (created_at, month_kst, model, input_tokens, output_tokens, cost_usd, '
+                          'status) VALUES (?,?,?,?,?,?,?)', (now_utc(), self.month, model, int(input_tokens),
+                                                             int(output_tokens), float(cost_usd), status[:200]))
+        self.conn.commit()   # spend is recorded even if a later stage fails
 
 
 def upsert_macro(conn, series_id, rows, source_id):

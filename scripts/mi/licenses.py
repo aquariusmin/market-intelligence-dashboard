@@ -90,6 +90,26 @@ SOURCES = {
                      notes='미국 지수 자체가 아니라 추종 ETF 가격 (일부 거래소 기준, 정규장 공식 종가). ' + 'Toss FAQ 데이터 이용 정책: "투자자 본인의 매매 목적에 한하여 이용", 상업적 이용 및 제3자 배포 금지. '
                               '저장·ML 사용을 금지하는 조항 없음 → 본인 매매 판단용 개인 모델은 목적 범위 내로 판단(2026-10-16). '
                               '토큰에 권한 범위가 없어 주문도 가능 → mi/toss.py가 시세 경로만 허용.'),
+    'dart_openapi': dict(provider='금융감독원 OpenDART', dataset='공시 목록 (회사명·보고서명·접수일·뷰어 링크)',
+                         terms_url='https://opendart.fss.or.kr/intro/terms.do', collection='allowed',
+                         local_storage='unclear', ml_training='unclear', redistribution='unclear',
+                         verified_on='2026-10-16',
+                         notes='이용약관 제11조 ① "서비스는 원칙적으로 무료", 제10조 ④ 이용횟수 허용량 게시(오류 020 ≈ 일 2만 건), '
+                              '제19조 ② 인증키 제3자 이용 금지. 저장·재배포·가공 조항 없음 → unclear: SQLite 미보관, '
+                              'news.json에 최신 목록만 표시(매 실행 교체).'),
+    'ecos_openapi': dict(provider='한국은행 ECOS Open API', dataset='기준금리·국고채 3년 (표시 전용 참고 지표)',
+                         terms_url='https://ecos.bok.or.kr/api/', collection='allowed', local_storage='allowed',
+                         ml_training='conditional', redistribution='conditional', verified_on='2026-10-16',
+                         notes='경제통계 OPEN API 이용약관 제2조 3호: 이용자 = "공유서비스를 직접 이용하거나 새로운 창작물의 일부로 '
+                              '재가공하여 배포하는 자". 제5조 ①: "이용자는 통계정보를 상업적으로 이용할 수 있습니다. 다만 상업적인 '
+                              '이용을 제한하는 통계정보를 상업적인 목적으로 이용하고자 하는 경우에는 해당 통계 작성기관의 승인". '
+                              '통계작성기관별 조건이 남아 있어 ML·재배포는 conditional, 현재 표시 전용(data/reference_only).'),
+    'bok_mpc_calendar': dict(provider='Bank of Korea', dataset='통화정책방향 결정회의 일정 (날짜만, 수동 등록)',
+                             terms_url='https://www.bok.or.kr/portal/singl/crncyPolicyDrcMtg/listYear.do?mtgSe=A&menuNo=200755',
+                             collection='allowed', local_storage='allowed', ml_training='not_allowed',
+                             redistribution='allowed', verified_on='2026-10-16',
+                             notes='회의 날짜(사실 정보)만 공식 일정 페이지에서 옮겨 적음 · 페이지 수집·RSS 아님 · 링크로 출처 표시. '
+                                   '보도자료 제목·본문은 저작권보호방침상 사전 승인 전까지 미수집(bok_press_rss).'),
     'fomc_calendar': dict(provider='Federal Reserve Board', dataset='FOMC meeting calendar',
                           terms_url='https://www.federalreserve.gov/disclaimer.htm', collection='allowed',
                           local_storage='allowed', ml_training='allowed', redistribution='allowed',

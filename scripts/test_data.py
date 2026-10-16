@@ -230,6 +230,24 @@ class V03Test(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):macro.collect_macro(path,{'fred':ok,'ecos':ok},today)
             self.assertEqual(path.read_text(),'{broken')
 
+    def test_macro_providers_subset_never_calls_other_adapters(self):
+        today=date(2026,10,15)
+        def ok(*a):return [{'date':'2026-10-13','close':3},{'date':'2026-10-14','close':4}]
+        def boom(*a):raise AssertionError('FRED must not be fetched')
+        with tempfile.TemporaryDirectory() as directory,contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+            path=Path(directory)/'macro.json'
+            macro.collect_macro(path,{'fred':ok,'ecos':ok},today)
+            before=json.loads(path.read_text())
+            self.assertEqual(macro.collect_macro(path,{'fred':boom,'ecos':ok},today,providers=['ecos']),0)
+            after=json.loads(path.read_text())
+            self.assertEqual(after['indicators']['bok_rate']['status'],'ok')
+            self.assertEqual(after['indicators']['vix'],before['indicators']['vix'])   # kept as it was
+            path.unlink()
+            macro.collect_macro(path,{'fred':boom,'ecos':ok},today,providers=['ecos'])
+            fresh=json.loads(path.read_text())
+            self.assertEqual(fresh['indicators']['vix']['status'],'unavailable')
+            self.assertIn('--providers ecos',fresh['indicators']['vix']['error'])
+
     def test_ecos_parser_and_key_not_in_process_arguments(self):
         config=macro.MACRO['bok_rate']
         reply={'StatisticSearch':{'list_total_count':1,'row':[{'STAT_CODE':'722Y001','ITEM_CODE1':'0101000','TIME':'20261014','DATA_VALUE':'2.50'}]}}

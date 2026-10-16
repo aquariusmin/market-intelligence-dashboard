@@ -8,10 +8,11 @@ MI=/path/to/market-intelligence-dashboard
 # scripts/cron_run.sh sources ~/.config/mi/env (chmod 600; e.g. `export KRX_API_KEY=...`), creates data/ for the
 # log and wraps each run in flock so jobs never overlap.
 # 08:30 morning briefing (ingest is part of `morning`; US close = 05:00 KST in EDT / 06:00 KST in EST)
-30 8 * * 1-6  $MI/scripts/cron_run.sh morning
+# --llm: AI summary within the monthly budget (briefing.LLM_MONTHLY_BUDGET_USD); skipped without ANTHROPIC_API_KEY
+30 8 * * 1-6  $MI/scripts/cron_run.sh morning --llm
 # 16:30 Korea close analysis. KRX OPEN API daily index data may only appear the next morning;
 # the 08:30 run then picks it up, and timing.py treats KRX closes as known only from 08:00 KST next day.
-30 16 * * 1-5 $MI/scripts/cron_run.sh evening
+30 16 * * 1-5 $MI/scripts/cron_run.sh evening --llm
 # Sunday 10:00 weekly re-validation / retraining
 0 10 * * 0    $MI/scripts/cron_run.sh weekly
 # after boot (e.g. WSL started again): replay the latest missed slot; the delay lets the network come up
